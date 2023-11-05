@@ -12,15 +12,15 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision: str = '051258111647'
+revision: str = "051258111647"
 down_revision: Union[str, None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.execute('CREATE SCHEMA IF NOT EXISTS sales_leads;')
+    op.execute("CREATE SCHEMA IF NOT EXISTS sales_leads;")
 
 
 def downgrade() -> None:
-    op.execute('DROP SCHEMA IF EXISTS sales_leads;')
+    op.execute("DROP SCHEMA IF EXISTS sales_leads;")

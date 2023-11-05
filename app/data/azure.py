@@ -122,19 +122,35 @@ class PostgresExporter:
         with self.engine.connect() as connection:
             connection.execute(text(f"CREATE SCHEMA IF NOT EXISTS {schema}"))
 
+    def _clean_column_names(self, dataset: pd.DataFrame) -> pd.DataFrame:
+        dataset.columns = (
+            dataset.columns.str.strip()
+            .str.lower()
+            .str.replace("\s|-|\|/|\.|\(|\)", "_", regex=True)
+        )
+        # remove doulbe underscores and trailing underscores
+        dataset.columns = dataset.columns.str.replace("__", "_", regex=True).str.rstrip('_')
+        return dataset
+
     def insert_raw_data(
-        self, dataset: pd.DataFrame, table_name: str, schema: str
+        self,
+        dataset: pd.DataFrame,
+        table_name: str,
+        schema: str,
+        created_at_column: Optional[str] = "created_at",
     ) -> None:
+        dataset = self._clean_column_names(dataset)
+
         dataset = dataset.astype(str)
-        dataset["_inserted_at"] = pd.to_datetime("now").utcnow()
+        dataset[created_at_column] = pd.to_datetime("now").utcnow()
 
         col_types = {
             col: types.VARCHAR(dataset[col].astype(str).str.len().max())
             for col in dataset.columns
-            if col not in ["_inserted_at"]
+            if col not in [created_at_column]
         }
 
-        col_types["_inserted_at"] = types.DateTime()
+        col_types[created_at_column] = types.DateTime()
 
         dataset.to_sql(
             name=table_name,
@@ -144,4 +160,12 @@ class PostgresExporter:
             index=False,
             dtype=col_types,
         )
-        
+
+    def get_uuid_from_table(
+        self, table_name: str, schema: str, look_up_val: str, look_up_column
+    ) -> pd.DataFrame:
+        with self.engine.connect() as connection:
+            query = f"""
+            SELECT uuid FROM {schema}.{table_name} WHERE {look_up_column} = '{look_up_val}'
+            """
+            return pd.read_sql(query, connection)
