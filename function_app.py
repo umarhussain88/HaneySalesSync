@@ -8,6 +8,9 @@ import base64
 
 load_dotenv()
 
+# TODO: add a check to see if the file has already been imported before
+# if it has then skip. 
+# TODO: write functions to clean data and then move to psql. 
 # TODO: extend the Gdrive sheet to write to a Google Sheet.
 
 

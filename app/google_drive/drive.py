@@ -110,3 +110,12 @@ class GoogleDrive:
         return pd.read_csv(downloaded)
     
     
+    def update_tracking_table(self, dataframe) -> None: 
+        """ Get the records posted to google sheet and mark them as sent 
+        in the tracking table.
+        """    
+        pass 
+    
+    def write_to_google_sheet(self, dataframe) -> None:
+        pass 
+    
