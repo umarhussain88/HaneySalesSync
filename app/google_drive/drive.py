@@ -5,10 +5,12 @@ from google.oauth2 import service_account
 from typing import Optional
 from io import BytesIO
 import pandas as pd
+import gspread
+from gspread_dataframe import set_with_dataframe
+
 
 @dataclass
 class GoogleDrive:
-
     creds: Optional[service_account.Credentials] = None
     drive_service: Optional[Resource] = None
 
@@ -16,6 +18,7 @@ class GoogleDrive:
         self.creds = service_account.Credentials.from_service_account_info(self.creds)
         self.creds = self.creds.with_scopes(["https://www.googleapis.com/auth/drive"])
         self.drive_service = build("drive", "v3", credentials=self.creds)
+        self.client = gspread.authorize(self.creds)
 
     def get_shared_with_me(self) -> list:
         files = (
@@ -24,7 +27,7 @@ class GoogleDrive:
                 q="sharedWithMe=true and trashed=false and mimeType='application/vnd.google-apps.folder'",
                 fields="files(id, name, parents, mimeType, createdTime, modifiedTime)",
             )
-            .execute() 
+            .execute()
         )
         return files
 
@@ -84,11 +87,12 @@ class GoogleDrive:
                 q=f"trashed=false and (modifiedTime > '{delta}' or createdTime > '{delta}') and mimeType!='application/vnd.google-apps.folder'",
                 fields="files(id, name, parents, createdTime, modifiedTime,owners,lastModifyingUser, fileExtension)",
                 pageSize=1000,
-            ).execute()
+            )
+            .execute()
         )
         return files
 
-    def create_file_list_dataframe(self,folder_list: list) -> pd.DataFrame:
+    def create_file_list_dataframe(self, folder_list: list) -> pd.DataFrame:
         file_list_df = pd.concat(
             [pd.json_normalize(folder["files"], max_level=1) for folder in folder_list]
         )
@@ -108,14 +112,18 @@ class GoogleDrive:
         downloaded = self.download_file(file_id)
         downloaded.seek(0)
         return pd.read_csv(downloaded)
-    
-    
-    def update_tracking_table(self, dataframe) -> None: 
-        """ Get the records posted to google sheet and mark them as sent 
+
+    def update_tracking_table(self, dataframe) -> None:
+        """Get the records posted to google sheet and mark them as sent
         in the tracking table.
-        """    
-        pass 
-    
-    def write_to_google_sheet(self, dataframe) -> None:
-        pass 
-    
+        """
+        pass
+
+    def write_to_google_sheet(
+        self, dataframe: pd.DataFrame, spreadsheet_name: str, target_sheet: str
+    ) -> None:
+        workbook = self.client.open(spreadsheet_name)
+        sheet = workbook[target_sheet]
+        sheet.clear()
+
+        set_with_dataframe(sheet, dataframe)
