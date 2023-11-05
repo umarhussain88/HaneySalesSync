@@ -133,4 +133,10 @@ __blobstorage__
 __queuestorage__
 __azurite_db*__.json
 .python_packages
+
+
+target/
+dbt_packages/
+logs/
 .vscode
+/data

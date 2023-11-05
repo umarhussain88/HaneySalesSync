@@ -4,6 +4,7 @@ from app import GoogleDrive, PostgresExporter
 from dotenv import load_dotenv
 import json
 import os
+import base64
 
 load_dotenv()
 
@@ -22,9 +23,12 @@ def sales_sync(myTimer: func.TimerRequest) -> None:
         logging.info("The timer is past due!")
 
     logging.info("Creating gdrive service")
-    creds = os.environ.get("service_account")
-    creds_json = json.loads(creds)
-    gdrive = GoogleDrive(creds=creds_json)
+    encoded_json_string = os.environ.get("service_account")
+    decoded_json_string = base64.b64decode(encoded_json_string).decode()
+    decoded_data = json.loads(decoded_json_string)
+    
+    
+    gdrive = GoogleDrive(creds=decoded_data)
     psql = PostgresExporter(
         username=os.environ.get("psql_username"),
         host=os.environ.get("psql_server"),
@@ -41,6 +45,11 @@ def sales_sync(myTimer: func.TimerRequest) -> None:
     psql.insert_raw_data(file_dataframe,'drive_metadata','sales_leads' )
     
     for file in latest_files['files']:
+        # need a psql function to get the primary key of the file and 
+        # then add that key to the file
+        # then run dbt models. 
+        
+        # will then need to output a view into a google sheet. 
         df = gdrive.get_stream_object(file['id'])
         psql.insert_raw_data(df, 'leads', 'sales_leads')
         
