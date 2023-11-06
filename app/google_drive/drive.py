@@ -70,7 +70,7 @@ class GoogleDrive:
         ).drop_duplicates()
 
     def get_recent_or_modified_files(
-        self, delta_days: int = 7, sensor: Optional[bool] = False
+        self, delta_days: int = 7, sensor: Optional[bool] = False, 
     ) -> list:
         if sensor:
             delta = (pd.Timestamp("now") - pd.DateOffset(seconds=60)).strftime(
@@ -92,12 +92,12 @@ class GoogleDrive:
         )
         return files
 
-    def create_file_list_dataframe(self, folder_list: list) -> pd.DataFrame:
+    def create_file_list_dataframe(self, folder_list: list, parent_folder: Optional[str] = None) -> pd.DataFrame:
         file_list_df = pd.concat(
             [pd.json_normalize(folder["files"], max_level=1) for folder in folder_list]
         )
 
-        return file_list_df
+        return file_list_df.loc[file_list_df['parents'].explode().eq(parent_folder)]
 
     def download_file(self, file_id: str, request_type: str = "media") -> BytesIO:
         request = self.drive_service.files().get_media(fileId=file_id)
@@ -123,7 +123,7 @@ class GoogleDrive:
         self, dataframe: pd.DataFrame, spreadsheet_name: str, target_sheet: str
     ) -> None:
         workbook = self.client.open(spreadsheet_name)
-        sheet = workbook[target_sheet]
+        sheet = workbook.worksheet(target_sheet)
         sheet.clear()
 
         set_with_dataframe(sheet, dataframe)

@@ -129,7 +129,9 @@ class PostgresExporter:
             .str.replace("\s|-|\|/|\.|\(|\)", "_", regex=True)
         )
         # remove doulbe underscores and trailing underscores
-        dataset.columns = dataset.columns.str.replace("__", "_", regex=True).str.rstrip('_')
+        dataset.columns = dataset.columns.str.replace("__", "_", regex=True).str.rstrip(
+            "_"
+        )
         return dataset
 
     def insert_raw_data(
@@ -139,27 +141,62 @@ class PostgresExporter:
         schema: str,
         created_at_column: Optional[str] = "created_at",
     ) -> None:
-        dataset = self._clean_column_names(dataset)
+        
+        if dataset.empty:
+            pass
 
-        dataset = dataset.astype(str)
-        dataset[created_at_column] = pd.to_datetime("now").utcnow()
+        else:
+        
+            dataset = self._clean_column_names(dataset)
 
-        col_types = {
-            col: types.VARCHAR(dataset[col].astype(str).str.len().max())
-            for col in dataset.columns
-            if col not in [created_at_column]
-        }
+            dataset = dataset.astype(str)
+            dataset[created_at_column] = pd.to_datetime("now").utcnow()
 
-        col_types[created_at_column] = types.DateTime()
+            col_types = {
+                col: types.VARCHAR(dataset[col].astype(str).str.len().max())
+                for col in dataset.columns
+                if col not in [created_at_column]
+            }
 
-        dataset.to_sql(
-            name=table_name,
-            schema=schema,
-            con=self.engine,
-            if_exists="append",
-            index=False,
-            dtype=col_types,
-        )
+            col_types[created_at_column] = types.DateTime()
+            dataset = dataset.replace('nan', None)
+
+            dataset.to_sql(
+                name=table_name,
+                schema=schema,
+                con=self.engine,
+                if_exists="append",
+                index=False,
+                dtype=col_types,
+            )
+
+    def check_if_record_exists(
+        self,
+        table_name: str,
+        schema: str,
+        source_dataframe: pd.DataFrame,
+        look_up_column: str,
+    ) -> pd.DataFrame:
+        """
+        Checks to see if we've already imported the file.
+        
+        returns a dataframe of the records that do not exist in the database.
+        (Left anti join on id)
+        """
+        
+        look_up_vals = source_dataframe[look_up_column].unique().tolist()
+
+        query = f"""
+        
+        SELECT id FROM {schema}.{table_name} WHERE {look_up_column} IN  ({', '.join(f"'{item}'" for item in look_up_vals)})
+        
+        """
+
+        current_files = pd.read_sql(query, self.engine)
+
+        return source_dataframe.loc[
+            ~source_dataframe[look_up_column].isin(current_files[look_up_column])
+        ]
 
     def get_uuid_from_table(
         self, table_name: str, schema: str, look_up_val: str, look_up_column
