@@ -43,7 +43,6 @@ def upgrade():
         sa.Column("status", status_enum, nullable=False),
         sa.Column("email_address", sa.String(255), nullable=False),
         sa.Column("created_at", sa.DateTime(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(), nullable=False),
         schema='sales_leads'
         
     )

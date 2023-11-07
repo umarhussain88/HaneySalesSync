@@ -7,6 +7,8 @@ from io import BytesIO
 import pandas as pd
 import gspread
 from gspread_dataframe import set_with_dataframe
+from gspread.exceptions import WorksheetNotFound
+import logging
 
 
 @dataclass
@@ -122,8 +124,16 @@ class GoogleDrive:
     def write_to_google_sheet(
         self, dataframe: pd.DataFrame, spreadsheet_name: str, target_sheet: str
     ) -> None:
-        workbook = self.client.open(spreadsheet_name)
-        sheet = workbook.worksheet(target_sheet)
-        sheet.clear()
-
-        set_with_dataframe(sheet, dataframe)
+        spreadsheet = self.client.open(spreadsheet_name)
+        
+        try:
+            worksheet = spreadsheet.worksheet(target_sheet)
+            logging.info('Worksheet found, updating worksheet')
+            start_row = worksheet.row_count + 1 
+            
+            set_with_dataframe(worksheet, dataframe, row=start_row, include_column_header=False)
+        except WorksheetNotFound:
+            logging.info('Worksheet not found, creating new worksheet')
+            worksheet = spreadsheet.add_worksheet(title=target_sheet, rows='100', cols='20')
+            worksheet.clear()
+            set_with_dataframe(worksheet, dataframe)

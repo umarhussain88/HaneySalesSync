@@ -206,3 +206,28 @@ class PostgresExporter:
             SELECT uuid FROM {schema}.{table_name} WHERE {look_up_column} = '{look_up_val}'
             """
             return pd.read_sql(query, connection)
+        
+    def update_tracking_table(self, status : str, dataframe: pd.DataFrame) -> None:
+        """Two primary pathways to update records.
+        
+        1. the customer is already with Shopify hence we just need to mark them as such.
+        2. the customer is not with Shopify but we've identified them as a lead and we need to mark them as sent. 
+        
+        """
+        
+        dataframe["status"] = status
+        
+        dataframe = dataframe.rename(columns={'uuid' : 'lead_uuid'})
+        
+        dataframe = dataframe[
+            ['lead_uuid', 'status', 'email_address']
+        ]
+        
+        dataframe['created_at'] = pd.to_datetime("now").utcnow()
+        
+        dataframe.to_sql(
+            'tracking',schema='sales_leads', con=self.engine, if_exists='append', index=False
+        )
+        
+        
+    

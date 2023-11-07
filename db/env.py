@@ -2,12 +2,20 @@ from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config
 from sqlalchemy import pool
-
+from dotenv import load_dotenv
+import os
 from alembic import context
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
+
+load_dotenv()
+
+
+if os.environ.get('FUNCTIONS_ENVIRONMENT') == 'preview':
+    config.set_main_option("sqlalchemy.url", os.environ.get("ALEMBIC_SQL_ALCHEMY_URL"))
+
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
@@ -44,6 +52,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        version_table_schema="alembic",
     )
 
     with context.begin_transaction():
@@ -65,7 +74,9 @@ def run_migrations_online() -> None:
 
     with connectable.connect() as connection:
         context.configure(
-            connection=connection, target_metadata=target_metadata
+            connection=connection,
+            target_metadata=target_metadata,
+            version_table_schema="alembic",
         )
 
         with context.begin_transaction():

@@ -5,30 +5,40 @@ import pandas as pd
 @dataclass
 class SalesTransformations:
     target_schema = {
-        "first_name": "first_name",
-        "last_name": "last_name",
-        "title": "job_title",
-        "role": "job_function",
-        "email": "email_address",
-        "linkedin": "linkedin_contact_profile_url",
-        "company": "company_name",
-        "phone": "direct_phone_number",
-        "phone_1": "direct_phone_number",
+        "First Name": "first_name",
+        "Last Name": "last_name",
+        "Title": "job_title",
+        "Role": "job_function",
+        "Email": "email_address",
+        "Linkedin": "linkedin_contact_profile_url",
+        "Company": "company_name",
+        "Phone": "direct_phone_number",
+        "Mobile": "mobile_phone",
     }
 
     def get_new_lead_data(self, dataframe, engine):
         df = pd.read_sql(
             """
-                SELECT s.*
-                FROM sales_leads.leads                 s
-                LEFT JOIN dm_shopify.sales_customer_view   c
-                    ON s.email_address = c.email
-                LEFT JOIN sales_leads.tracking t
-                    ON t.lead_uuid = s.uuid
+                WITH cte_new_latest_leads AS
+                    (
+                    SELECT s.*
+                        , ROW_NUMBER()
+                            OVER (PARTITION BY s.email_address ORDER BY s.created_at DESC) AS row_number
+                    FROM sales_leads.leads                     s
+                    LEFT JOIN dm_shopify.sales_customer_view c
+                        ON s.email_address = c.email
+                    LEFT JOIN sales_leads.tracking           t
+                        ON t.lead_uuid = s.uuid
+                    WHERE
+                        c.email IS NULL -- not seen this customer before
+                    AND t.uuid IS NULL -- and not sent this record previously.
+                    AND s.email_address IS NOT NULL -- filter out blank emails.
+                    )
+
+                SELECT *
+                FROM cte_new_latest_leads
                 WHERE
-                    c.email IS NULL -- not seen this customer before
-                AND t.uuid IS NULL -- and not sent this record previously.
-                AND s.email_address is not null -- filter out blank emails.
+                row_number = 1
             """, engine
         )
         
@@ -48,6 +58,13 @@ class SalesTransformations:
         pass
 
     def create_google_lead_sheet(self, dataframe: pd.DataFrame) -> pd.DataFrame:
-        dataframe = dataframe[self.target_schema.values()]
+        
+        phone_df = dataframe[self.target_schema.values()].copy()
+        
+        phone_cols = phone_df.filter(like='phone').columns 
+        
+        phone_df[phone_cols] = phone_df[phone_cols].apply(lambda x : '="' + x + '"',axis=1)
+        
+        phone_df = phone_df.rename(columns={v : k for k,v in self.target_schema.items()})
 
-        return dataframe 
+        return phone_df 
