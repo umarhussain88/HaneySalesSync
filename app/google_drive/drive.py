@@ -7,8 +7,9 @@ from io import BytesIO
 import pandas as pd
 import gspread
 from gspread_dataframe import set_with_dataframe
-from gspread.exceptions import WorksheetNotFound
+from gspread.exceptions import WorksheetNotFound, SpreadsheetNotFound
 import logging
+import sys
 
 
 @dataclass
@@ -72,7 +73,9 @@ class GoogleDrive:
         ).drop_duplicates()
 
     def get_recent_or_modified_files(
-        self, delta_days: int = 7, sensor: Optional[bool] = False, 
+        self,
+        delta_days: int = 7,
+        sensor: Optional[bool] = False,
     ) -> list:
         if sensor:
             delta = (pd.Timestamp("now") - pd.DateOffset(seconds=60)).strftime(
@@ -94,12 +97,17 @@ class GoogleDrive:
         )
         return files
 
-    def create_file_list_dataframe(self, folder_list: list, parent_folder: Optional[str] = None) -> pd.DataFrame:
+    def create_file_list_dataframe(
+        self, folder_list: list, parent_folder: Optional[str] = None
+    ) -> pd.DataFrame:
         file_list_df = pd.concat(
             [pd.json_normalize(folder["files"], max_level=1) for folder in folder_list]
         )
 
-        return file_list_df.loc[file_list_df['parents'].explode().eq(parent_folder)]
+        if parent_folder:
+            return file_list_df.loc[file_list_df["parents"].explode().eq(parent_folder)]
+        else:
+            return file_list_df
 
     def download_file(self, file_id: str, request_type: str = "media") -> BytesIO:
         request = self.drive_service.files().get_media(fileId=file_id)
@@ -115,25 +123,112 @@ class GoogleDrive:
         downloaded.seek(0)
         return pd.read_csv(downloaded)
 
-    def update_tracking_table(self, dataframe) -> None:
-        """Get the records posted to google sheet and mark them as sent
-        in the tracking table.
+    def get_spreadsheet(
+        self,
+        spreadsheet_name: str,
+        worksheet_name: str,
+        folder_id: Optional[str] = None,
+    ) -> gspread.Worksheet:
+        try:
+            spreadsheet = self.client.open(spreadsheet_name, folder_id=folder_id)
+        except SpreadsheetNotFound:
+            self.create_new_quickmail_output_sheet(spreadsheet_name=spreadsheet_name, folder_id=folder_id)
+            spreadsheet = self.client.open(spreadsheet_name)
+
+        try:
+            worksheet = spreadsheet.worksheet(worksheet_name)
+            logging.info("Worksheet Found Returning worksheet object")
+            return worksheet
+        except WorksheetNotFound:
+            new_worksheet = self.create_worksheet(
+                sheet_name=worksheet_name, spreadsheet=spreadsheet
+            )
+            return new_worksheet
+
+    def create_worksheet(
+        self, sheet_name: str, spreadsheet: gspread.Spreadsheet
+    ) -> gspread.Worksheet:
+        """creates worksheet if not found
+
+        Args:
+            sheet_name (str): Sheetname of a given spreadsheet.
         """
-        pass
+        logging.info("Worksheet not found, creating new worksheet")
+        worksheet = spreadsheet.add_worksheet(title=sheet_name, rows="100", cols="20")
+        return worksheet
+
+    def get_row_number_to_append_to(self, worksheet: gspread.Worksheet) -> int:
+        current_row_count_values = len(worksheet.get_all_values())
+
+        if current_row_count_values == 0:
+            return 1
+        else:
+            return current_row_count_values + 1
 
     def write_to_google_sheet(
-        self, dataframe: pd.DataFrame, spreadsheet_name: str, target_sheet: str
+        self,
+        dataframe: pd.DataFrame,
+        spreadsheet_name: str,
+        target_sheet: str,
+        folder_id: str,
+        replacement_strategy: Optional[str] = "replace",
     ) -> None:
-        spreadsheet = self.client.open(spreadsheet_name)
-        
-        try:
-            worksheet = spreadsheet.worksheet(target_sheet)
-            logging.info('Worksheet found, updating worksheet')
-            start_row = worksheet.row_count + 1 
-            
-            set_with_dataframe(worksheet, dataframe, row=start_row, include_column_header=False)
-        except WorksheetNotFound:
-            logging.info('Worksheet not found, creating new worksheet')
-            worksheet = spreadsheet.add_worksheet(title=target_sheet, rows='100', cols='20')
+        worksheet = self.get_spreadsheet(
+            spreadsheet_name=spreadsheet_name, worksheet_name=target_sheet, folder_id=folder_id
+        )
+
+        if replacement_strategy == "replace":
+            rc = 1
             worksheet.clear()
-            set_with_dataframe(worksheet, dataframe)
+        else:
+            rc = self.get_row_number_to_append_to(worksheet=worksheet)
+
+        include_headers = True if rc <= 1 else False
+
+        set_with_dataframe(
+            dataframe=dataframe,
+            worksheet=worksheet,
+            row=rc,
+            include_column_header=include_headers,
+        )
+
+    def get_file_config(
+        self, config_name_spreadsheet_name: str, folder_id: str
+    ) -> pd.DataFrame:
+        """Get the config file from the google drive folder.
+
+        if a file does not have an assoicated config file then:
+
+        post the file to the google sheet
+
+        don't post the file to the google sheet
+        """
+
+        config = self.get_spreadsheet(
+            spreadsheet_name=config_name_spreadsheet_name,
+            worksheet_name="Sheet1",
+            folder_id=folder_id,
+        )
+
+        if len(config.get_all_values()) == 1:
+            logging.info("No data in config file")
+            return pd.DataFrame(data=[], columns=config.get_all_values()[0])
+        else:
+            return pd.DataFrame(config.get_all_records())
+
+    def create_new_quickmail_output_sheet(self, spreadsheet_name: str, folder_id: str) -> None:
+        file_metadata = {
+            "name": spreadsheet_name,
+            "mimeType": "application/vnd.google-apps.spreadsheet",
+            "parents": [folder_id],
+        }
+
+        self.drive_service.files().create(body=file_metadata).execute()
+
+    def write_file_to_google_sheet(self, file_name: str) -> None:
+        """Write the file to the google sheet.
+
+        Args:
+            file_name (str): file_name from drive_metadata table
+        """
+        pass

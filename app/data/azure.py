@@ -5,6 +5,10 @@ from typing import Optional
 import pandas as pd
 from sqlalchemy import create_engine, types, text
 from sqlalchemy.engine import URL
+from notifiers import get_notifier
+import textwrap
+import logging
+from typing import List
 
 
 @dataclass
@@ -146,7 +150,6 @@ class PostgresExporter:
             pass
 
         else:
-        
             dataset = self._clean_column_names(dataset)
 
             dataset = dataset.astype(str)
@@ -159,7 +162,7 @@ class PostgresExporter:
             }
 
             col_types[created_at_column] = types.DateTime()
-            dataset = dataset.replace('nan', None)
+            dataset = dataset.replace("nan", None)
 
             dataset.to_sql(
                 name=table_name,
@@ -179,26 +182,28 @@ class PostgresExporter:
     ) -> pd.DataFrame:
         """
         Checks to see if we've already imported the file.
-        
+
         returns a dataframe of the records that do not exist in the database.
         (Left anti join on id)
         """
-        
-        look_up_vals = source_dataframe[look_up_column].unique().tolist()
 
-        query = f"""
-        
-        SELECT id FROM {schema}.{table_name} WHERE {look_up_column} IN  ({', '.join(f"'{item}'" for item in look_up_vals)})
-        
-        """
+        if source_dataframe.empty:
+            logging.info('No new files to process')
+        else:
+            look_up_vals = source_dataframe[look_up_column].unique().tolist()
 
-        current_files = pd.read_sql(query, self.engine)
+            query = f"""
+            
+            SELECT id FROM {schema}.{table_name} WHERE {look_up_column} IN  ({', '.join(f"'{item}'" for item in look_up_vals)})
+            """
 
-        return source_dataframe.loc[
-            ~source_dataframe[look_up_column].isin(current_files[look_up_column])
-        ]
+            current_files = pd.read_sql(query, self.engine)
 
-    def get_uuid_from_table(
+            return source_dataframe.loc[
+                ~source_dataframe[look_up_column].isin(current_files[look_up_column])
+            ]
+
+    def get_uuid_from_table(  # TODO: rename this function
         self, table_name: str, schema: str, look_up_val: str, look_up_column
     ) -> pd.DataFrame:
         with self.engine.connect() as connection:
@@ -206,28 +211,191 @@ class PostgresExporter:
             SELECT uuid FROM {schema}.{table_name} WHERE {look_up_column} = '{look_up_val}'
             """
             return pd.read_sql(query, connection)
+
+    def update_tracking_table(self, drive_metadata_uuid: str) -> None:
+        """
+        Get the assoicated UUID and write an update statement
+        to the tracking table.
+        """
+
+        qry = f"""
+        WITH new_data AS (
+            SELECT l.email_address
+            , l.uuid as lead_uuid
+            , 'posted' as status
+            FROM sales_leads.leads l
+            WHERE l.drive_metadata_uuid = '{drive_metadata_uuid}'
+            and l.email_address is not null
+        )
+        INSERT INTO sales_leads.tracking
+        (lead_uuid, status, email_address, created_at)
+        SELECT lead_uuid, status::status_enum, email_address, CURRENT_TIMESTAMP
+        FROM new_data
+        WHERE lead_uuid NOT IN (SELECT lead_uuid FROM sales_leads.tracking);
+        """
+
+        with self.engine.begin() as connection:
+            connection.execute(text(qry))
+
+    def update_tracking_table_shopify_customer(self, drive_metadata_uuid: str) -> None:
         
-    def update_tracking_table(self, status : str, dataframe: pd.DataFrame) -> None:
-        """Two primary pathways to update records.
         
-        1. the customer is already with Shopify hence we just need to mark them as such.
-        2. the customer is not with Shopify but we've identified them as a lead and we need to mark them as sent. 
+        with self.engine.begin() as connection:
+            qry = f"""WITH new_data AS (
+                SELECT  tracking.uuid 
+                , l.email_address
+                , l.uuid as lead_uuid
+                , 'shopify_customer' as status
+                FROM sales_leads.leads l
+                INNER JOIN dm_shopify.sales_customer_view scv
+                ON l.email_address = scv.email
+                LEFT JOIN sales_leads.tracking
+                  ON l.uuid = tracking.lead_uuid
+                WHERE drive_metadata_uuid = '{drive_metadata_uuid}'
+                AND (tracking.lead_uuid IS NULL
+                    OR tracking.status = 'posted') 
+                    -- we check for shopify customers AFTER they have been posted
+                    -- so we want to update these records
+                )
+    
+                INSERT INTO sales_leads.tracking
+                (uuid, lead_uuid, status, email_address, created_at)
+                SELECT uuid, lead_uuid, status::status_enum, email_address, CURRENT_TIMESTAMP
+                FROM new_data
+                ON CONFLICT (uuid)
+                DO UPDATE
+                SET status = EXCLUDED.status
+                  , created_at = CURRENT_TIMESTAMP
+                ;
+            """
+
+            connection.execute(text(qry))
+
+    def get_slack_channel_metrics(self, drive_metadata_uuid : str) -> pd.DataFrame:
+        return pd.read_sql(
+            f""" 
+                     SELECT d.name
+                          , SUM(CASE WHEN tracking.status = 'shopify_customer' THEN 1 ELSE 0 END) AS number_of_shopify_customers
+                          , SUM(CASE WHEN tracking.status = 'posted' THEN 1 ELSE 0 END)           AS number_of_posted_leads
+                          , d.created_at
+                     FROM sales_leads.tracking
+                       LEFT JOIN sales_leads.leads          l
+                         ON l.uuid = tracking.lead_uuid
+                       LEFT JOIN sales_leads.drive_metadata d
+                         ON d.uuid = l.drive_metadata_uuid
+                     WHERE l.drive_metadata_uuid IN ('{drive_metadata_uuid}')
+                     GROUP BY d.name, d.created_at
+                     
+                           """,
+            self.engine,
+        )
+
+    def create_config_temp_table(self, temp_table_name: str) -> None:
+        qry = f"""
+        CREATE TEMPORARY TABLE {temp_table_name} (
+            
+            filename varchar(255),
+            hubspot_owner varchar(255),
+            zi_search varchar(255) )           
+        """
+
+        with self.engine.begin() as connection:
+            connection.execute(text(qry))
+
+    def update_config_metadata(self, dataframe: pd.DataFrame) -> None:
+        if dataframe.empty:
+            pass
+        else:
+            self.create_config_temp_table(temp_table_name="temp_config")
+
+            dataframe.columns = ["filename", "hubspot_owner", "zi_search"]
+
+            dataframe.to_sql(
+                name="temp_config", con=self.engine, if_exists="append", index=False
+            )
+
+            qry = """
+            WITH drive_metadata AS (
+                SELECT d.uuid
+                , f.hubspot_owner
+                , f.zi_search
+                , current_timestamp as updated_at
+                FROM sales_leads.drive_metadata d
+                INNER JOIN temp_config f
+                    ON f.filename = d.name
+                WHERE d.config_file_uuid IS NULL -- only update records that have not been updated before.
+            )
+            INSERT INTO sales_leads.drive_metadata
+            (uuid, hubspot_owner, zi_search, updated_at)
+            SELECT uuid, hubspot_owner, zi_search, updated_at
+            FROM drive_metadata
+            ON CONFLICT (uuid) DO UPDATE
+            SET config_file_uuid = gen_random_uuid()
+            , hubspot_owner = EXCLUDED.hubspot_owner
+            , zi_search = EXCLUDED.zi_search
+            , updated_at = EXCLUDED.updated_at;
+            DROP TABLE temp_config;
+            """
+
+        with self.engine.begin() as connection:
+            connection.execute(text(qry))
+
+    def get_and_post_missing_config(self, slack_webhook) -> None:
+        missing_config = pd.read_sql(
+            """ 
+            SELECT name, created_at, lastmodifyinguser_displayname
+            FROM sales_leads.drive_metadata
+            WHERE
+            config_file_uuid IS NULL
+            AND has_posted_on_slack = False
+            """,
+            self.engine,
+        )
+
+        if not missing_config.empty:
+            for index, row in missing_config.iterrows():
+                notifier = get_notifier("slack")
+                missing_config_msg = textwrap.dedent(
+                    f"""
+                Missing Config File: {row['name']}
+                Created At: {row['created_at']}
+                Last Modified By: {row['lastmodifyinguser_displayname']}
+                Please update this file so an output file can be created.
+                https://docs.google.com/spreadsheets/d/1_wPctIjTdSXDvJIRmXw9S5MqYe3zE8dfCYGLYWg4BPg/edit#gid=0
+                """
+                )
+
+                notifier.notify(
+                    message=missing_config_msg,
+                    webhook_url=slack_webhook,
+                )
+
+    def send_update_slack_metrics(
+        self, slack_webhook: str, slack_df: pd.DataFrame
+    ) -> None:
+        for group, data in slack_df.groupby("name"):
+            message = textwrap.dedent(
+                f"""
+            {group}:
+            Number of Leads: {data['number_of_posted_leads'].values[0]}
+            Number of Shopify Customers: {data['number_of_shopify_customers'].values[0]}
+            """
+            )
+
+            notifier = get_notifier("slack")
+            logging.info(message)
+            notifier.notify(
+                message=message, webhook_url=os.environ.get("SLACK_WEBHOOK")
+            )
+            
+    def update_drive_table_slack_posted(self) -> None:
         
+        qry = f"""
+        UPDATE sales_leads.drive_metadata
+        SET has_posted_on_slack = True
+        WHERE config_file_uuid IS NULL
+        AND has_posted_on_slack = False
         """
         
-        dataframe["status"] = status
-        
-        dataframe = dataframe.rename(columns={'uuid' : 'lead_uuid'})
-        
-        dataframe = dataframe[
-            ['lead_uuid', 'status', 'email_address']
-        ]
-        
-        dataframe['created_at'] = pd.to_datetime("now").utcnow()
-        
-        dataframe.to_sql(
-            'tracking',schema='sales_leads', con=self.engine, if_exists='append', index=False
-        )
-        
-        
-    
+        with self.engine.begin() as connection:
+            connection.execute(text(qry))
