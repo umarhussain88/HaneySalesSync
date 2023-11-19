@@ -87,7 +87,7 @@ if os.environ.get("FUNCTIONS_ENVIRONMENT") == "preview":
 @app.schedule(
     schedule="*/10 * * * *",
     arg_name="GoogleSalesSync",
-    run_on_startup=True,
+    run_on_startup=False,
     use_monitor=False,
 )
 def sales_sync(GoogleSalesSync: func.TimerRequest) -> None:
@@ -99,7 +99,7 @@ def sales_sync(GoogleSalesSync: func.TimerRequest) -> None:
 
     psql = create_psql_service()
 
-    latest_files = gdrive.get_recent_or_modified_files(delta_days=13)
+    latest_files = gdrive.get_recent_or_modified_files(delta_days=1)
 
     file_dataframe = gdrive.create_file_list_dataframe(
         [latest_files], parent_folder=os.environ.get("PARENT_FOLDER")
