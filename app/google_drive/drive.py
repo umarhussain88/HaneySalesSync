@@ -103,8 +103,8 @@ class GoogleDrive:
         file_list_df = pd.concat(
             [pd.json_normalize(folder["files"], max_level=1) for folder in folder_list]
         )
-
-        if parent_folder:
+        
+        if parent_folder and not file_list_df.empty:
             return file_list_df.loc[file_list_df["parents"].explode().eq(parent_folder)]
         else:
             return file_list_df

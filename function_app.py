@@ -9,6 +9,7 @@ import pandas as pd
 import sentry_sdk
 from sentry_sdk.integrations.serverless import serverless_function
 from time import sleep
+import sys
 
 load_dotenv()
 
@@ -85,7 +86,7 @@ if os.environ.get("FUNCTIONS_ENVIRONMENT") == "preview":
 
 @serverless_function
 @app.schedule(
-    schedule="*/10 * * * *",
+    schedule="*/10 * * * 1-5",
     arg_name="GoogleSalesSync",
     run_on_startup=False,
     use_monitor=False,
@@ -105,75 +106,76 @@ def sales_sync(GoogleSalesSync: func.TimerRequest) -> None:
         [latest_files], parent_folder=os.environ.get("PARENT_FOLDER")
     )
 
-    logging.info(f"Number of files edited: {file_dataframe.shape[0]}")
+    if file_dataframe.empty:
+        logging.info("No new files to process")
+    else:
+            
+        logging.info(f"Number of files edited: {file_dataframe.shape[0]}")
 
-    logging.info("Getting file config")
+        logging.info("Getting file config")
 
-    file_config = gdrive.get_file_config(os.environ.get('QUICK_MAIL_CONFIG_NAME'), folder_id=os.environ.get("QUICK_MAIL_CONFIG_FOLDER_ID"))
-    logging.info(f"Number of config files: {file_config.shape[0]}")
+        file_config = gdrive.get_file_config(
+            os.environ.get("QUICK_MAIL_CONFIG_NAME"),
+            folder_id=os.environ.get("QUICK_MAIL_CONFIG_FOLDER_ID"),
+        )
+        logging.info(f"Number of config files: {file_config.shape[0]}")
 
-    logging.info("Updating config metadata")
+        logging.info("Updating config metadata")
 
-    file_dataframe_new = psql.check_if_record_exists(
-        table_name="drive_metadata",
-        schema="sales_leads",
-        source_dataframe=file_dataframe,
-        look_up_column="id",
-    )
-
-    logging.info(f"Number of new files: {file_dataframe_new.shape[0]}")
-
-    if not file_dataframe_new.empty:
-        psql.insert_raw_data(
-            dataset=file_dataframe_new,
+        file_dataframe_new = psql.check_if_record_exists(
             table_name="drive_metadata",
             schema="sales_leads",
+            source_dataframe=file_dataframe,
+            look_up_column="id",
         )
 
-    psql.update_config_metadata(file_config)
+        logging.info(f"Number of new files: {file_dataframe_new.shape[0]}")
 
-    ## get missing config file records and post notification to slack.
-    psql.get_and_post_missing_config(slack_webhook=os.environ.get("SLACK_WEBHOOK"))
-    psql.update_drive_table_slack_posted()
-
-    for file in file_dataframe_new["id"].tolist():
-        process_file(file, gdrive, psql)
-
-    new_lead_data = st.get_new_lead_data(psql.engine)
-
-    sheet_week = f"Week {pd.Timestamp('today').isocalendar().week}"
-    if not new_lead_data.empty:
-        for filename, data in new_lead_data.groupby("file_name"):
-            sheet_data = st.create_google_lead_data_frame(data)
-            
-            #TODO: check why the uuid is not being propogated to update the tracking tables.
-            
-            uuid = data["drive_metadata_uuid"].values[0]
-            logging.info(f"uuid: {uuid} for {filename}")
-
-            logging.info(f"Writing {filename} to google sheet")
-            gdrive.write_to_google_sheet(
-                dataframe=sheet_data,
-                spreadsheet_name=f"Quick Mail Output - {sheet_week}",
-                target_sheet=filename,
-                folder_id = os.environ.get("QUICK_MAIL_OUTPUT_PARENT_FOLDER_ID"),
-            )
-            logging.info("Wrote data to google sheet")
-
-            
-            psql.update_tracking_table(uuid)
-            logging.info("Updated tracking table")
-            sleep(1)
-            psql.update_tracking_table_shopify_customer(drive_metadata_uuid=uuid)
-            logging.info('Updated tracking table for shopify customer')
-            
-            slack_df = psql.get_slack_channel_metrics(
-                drive_metadata_uuid=uuid
-            )
-            psql.send_update_slack_metrics(
-                slack_webhook=os.environ.get("SLACK_WEBHOOK"), slack_df=slack_df
+        if not file_dataframe_new.empty:
+            psql.insert_raw_data(
+                dataset=file_dataframe_new,
+                table_name="drive_metadata",
+                schema="sales_leads",
             )
 
-        else:
-            logging.info("No new leads to process")
+        psql.update_config_metadata(file_config)
+
+        ## get missing config file records and post notification to slack.
+        psql.get_and_post_missing_config(slack_webhook=os.environ.get("SLACK_WEBHOOK"))
+        psql.update_drive_table_slack_posted()
+
+        for file in file_dataframe_new["id"].tolist():
+            process_file(file, gdrive, psql)
+
+        new_lead_data = st.get_new_lead_data(psql.engine)
+
+        sheet_week = f"Week {pd.Timestamp('today').isocalendar().week}"
+        if not new_lead_data.empty:
+            for filename, data in new_lead_data.groupby("file_name"):
+                sheet_data = st.create_google_lead_data_frame(data)
+                uuid = data["drive_metadata_uuid"].values[0]
+                logging.info(f"uuid: {uuid} for {filename}")
+
+                logging.info(f"Writing {filename} to google sheet")
+                gdrive.write_to_google_sheet(
+                    dataframe=sheet_data,
+                    spreadsheet_name=f"Quick Mail Output - {sheet_week}",
+                    target_sheet=filename,
+                    folder_id=os.environ.get("QUICK_MAIL_OUTPUT_PARENT_FOLDER_ID"),
+                )
+                logging.info("Wrote data to google sheet")
+
+                psql.update_tracking_table(uuid)
+                logging.info("Updated tracking table")
+                sleep(1)
+                psql.update_tracking_table_shopify_customer(drive_metadata_uuid=uuid)
+                logging.info("Updated tracking table for shopify customer")
+
+                slack_df = psql.get_slack_channel_metrics(drive_metadata_uuid=uuid)
+                psql.send_update_slack_metrics(
+                    slack_webhook=os.environ.get("SLACK_WEBHOOK"), slack_df=slack_df
+                )
+
+            else:
+                logging.info("No new leads to process")
     logging.info("Python timer trigger function executed.")
