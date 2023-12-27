@@ -88,7 +88,7 @@ if os.environ.get("FUNCTIONS_ENVIRONMENT") == "preview":
 @app.schedule(
     schedule="*/10 * * * 1-5",
     arg_name="GoogleSalesSync",
-    run_on_startup=False,
+    run_on_startup=True,
     use_monitor=False,
 )
 def sales_sync(GoogleSalesSync: func.TimerRequest) -> None:

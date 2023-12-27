@@ -15,6 +15,8 @@ load_dotenv()
 
 if os.environ.get('FUNCTIONS_ENVIRONMENT') == 'preview':
     config.set_main_option("sqlalchemy.url", os.environ.get("ALEMBIC_SQL_ALCHEMY_URL"))
+else:
+    config.set_main_option("sqlalchemy.url", os.environ.get("ALEMBIC_SQL_ALCHEMY_URL_PROD"))
 
 
 # Interpret the config file for Python logging.
