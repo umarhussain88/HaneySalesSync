@@ -279,7 +279,7 @@ class GoogleDrive:
     #TODO add the following into the above class to recursively trawl child folders for modified files.
     
     def get_all_files_in_folder(self, folder_id: str) -> list:
-        query = f"'{folder_id}' in parents and trashed=false"
+        query = f"'{folder_id}' in parents and trashed=false and name!='Processed'"
         results = self.drive_service.files().list(q=query, 
                                                 fields="files(id, name, parents, createdTime, modifiedTime,owners,lastModifyingUser, fileExtension, mimeType)"
                                                 ).execute()
@@ -305,4 +305,41 @@ class GoogleDrive:
                     all_files.append(file)
 
         return all_files
+    
+    def folder_exists(self, folder_name: str, parent_id ) -> bool:
         
+        query = f"name='{folder_name}' and '{parent_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
+        results = self.drive_service.files().list(q=query, fields='files(id, name)').execute()
+        items = results.get('files', [])
+        return len(items) > 0
+        
+    def create_processed_folder_if_not_exists(self, file_id : str) -> None:
+        parent_folder = self.get_parent_folder(file_id)
+        if not self.folder_exists("Processed", parent_folder[0]):
+            file_metadata = {
+                "name": "Processed",
+                "mimeType": "application/vnd.google-apps.folder",
+                "parents": parent_folder,
+            }
+            self.drive_service.files().create(body=file_metadata).execute()
+            
+    def get_processed_folder_id(self, file_id: str) -> str:
+        
+        parent_id = self.get_parent_folder(file_id)
+        query = f"name='Processed' and '{parent_id[0]}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
+        results = self.drive_service.files().list(q=query, fields='files(id, name)').execute()
+        items = results.get('files', [])
+        return items[0]['id']
+    
+        
+    def move_file_to_processed_folder(self, file_id: str) -> None:
+        
+        self.create_processed_folder_if_not_exists(file_id)
+        
+        file = self.drive_service.files().get(fileId=file_id, fields='parents').execute()
+        previous_parents = ",".join(file.get('parents'))
+        file['parents'] = [self.get_processed_folder_id(file_id)]
+        file = self.drive_service.files().update(fileId=file_id,
+                                            addParents=file['parents'],
+                                            removeParents=previous_parents,
+                                            fields='id, parents').execute()

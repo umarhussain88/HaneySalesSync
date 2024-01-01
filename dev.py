@@ -80,6 +80,40 @@ if __name__ == '__main__':
         for file in files_to_process.itertuples():
             logging.info(f"Processing file: {file.name}")
             psql.process_file(file.id, gdrive, file.file_type)
+        
+        new_lead_data_zi = st.get_new_zi_search_lead_data(psql.engine)
+
+        sheet_week = f"Week {pd.Timestamp('today').isocalendar().week}"
+        
+        if not new_lead_data_zi.empty:
+            for filename, data in new_lead_data_zi.groupby("file_name"):
+                sheet_data = st.create_google_lead_data_frame(data)
+                uuid = data["drive_metadata_uuid"].values[0]
+                logging.info(f"uuid: {uuid} for {filename}")
+
+                logging.info(f"Writing {filename} to google sheet")
+                gdrive.write_to_google_sheet(
+                    dataframe=sheet_data,
+                    spreadsheet_name=f"Quick Mail Output - {sheet_week}",
+                    target_sheet=filename,
+                    folder_id=os.environ.get("QUICK_MAIL_OUTPUT_PARENT_FOLDER_ID"),
+                )
+                logging.info("Wrote data to google sheet")
+
+                psql.update_tracking_table(uuid)
+                logging.info("Updated tracking table")
+                sleep(1)
+                psql.update_tracking_table_shopify_customer(drive_metadata_uuid=uuid)
+                logging.info("Updated tracking table for shopify customer")
+
+                slack_df = psql.get_slack_channel_metrics(drive_metadata_uuid=uuid)
+                psql.send_update_slack_metrics(
+                    slack_webhook=os.environ.get("SLACK_WEBHOOK"), slack_df=slack_df
+                )
+                
+
+            else:
+                logging.info("No new zi_search leads to process")
     
     
     
