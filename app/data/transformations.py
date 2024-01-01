@@ -4,6 +4,8 @@ import pandas as pd
 
 @dataclass
 class SalesTransformations:
+    
+    engine: str = None
     target_schema = {
         "First Name": "first_name",
         "Last Name": "last_name",
@@ -17,7 +19,7 @@ class SalesTransformations:
         "ZI Search": "zi_search",
     }
 
-    def get_new_lead_data(self,  engine) -> pd.DataFrame:
+    def get_new_zi_search_lead_data(self) -> pd.DataFrame:
         df = pd.read_sql(
             """
                 WITH cte_new_latest_leads AS
@@ -47,7 +49,7 @@ class SalesTransformations:
                     ON d.uuid = l.drive_metadata_uuid
                 WHERE row_number = 1
                 AND d.config_file_uuid IS NOT NULL
-                """, engine
+                """, self.engine
                 )
         
         return df
@@ -72,4 +74,13 @@ class SalesTransformations:
         phone_df = phone_df.rename(columns={v : k for k,v in self.target_schema.items()})
 
         return phone_df 
+
+    def get_new_city_search_lead_data(self):
+        
+        query = """
+        
+        
+        """
+        
+
 

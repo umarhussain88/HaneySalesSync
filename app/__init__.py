@@ -4,6 +4,7 @@ import logging
 import base64
 import json
 import os
+from pathlib import Path
 
 
 
@@ -19,7 +20,7 @@ def create_gdrive_service(service_account_b64_encoded: str = None):
     )
 
 
-def load_local_settings_as_env_vars(file_path: str):
+def load_local_settings_as_env_vars(file_path: Path):
     with open(file_path) as f:
         data = json.load(f)
 

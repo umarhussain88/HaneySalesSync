@@ -115,10 +115,12 @@ class GoogleDrive:
         
 
     def create_file_list_dataframe(
-        self, folder_list: list, parent_folder: Optional[str] = None
+        self, folder_list: list, parent_folder: Optional[str] = None, 
+        record_path: Optional[str] = "files"
+        
     ) -> pd.DataFrame:
         file_list_df = pd.concat(
-            [pd.json_normalize(folder["files"], max_level=1) for folder in folder_list]
+            [pd.json_normalize(folder, max_level=1, record_path=record_path) for folder in folder_list]
         )
         
         if parent_folder and not file_list_df.empty:
@@ -135,15 +137,9 @@ class GoogleDrive:
             _, done = downloader.next_chunk()
         return downloaded
 
-
-    def get_stream_object(self, file_id: str) -> pd.DataFrame:
+    def get_stream_object(self, file_id: str) -> BytesIO:
         downloaded = self.download_file(file_id)
-        downloaded.seek(0)
-        return pd.read_csv(downloaded)
-
-    # def get_stream_object(self, file_id: str) -> BytesIO:
-    #     downloaded = self.download_file(file_id)
-    #     return downloaded
+        return downloaded
 
     def get_spreadsheet(
         self,
@@ -282,30 +278,31 @@ class GoogleDrive:
         
     #TODO add the following into the above class to recursively trawl child folders for modified files.
     
-    # def get_all_files_in_folder(self, folder_id: str) -> list:
-    #     query = f"'{folder_id}' in parents and trashed=false"
-    #     results = self.drive_service.files().list(q=query, 
-    #                                             fields='files(id, name, mimeType)').execute()
-    #     items = results.get('files', [])
-    #     return items
+    def get_all_files_in_folder(self, folder_id: str) -> list:
+        query = f"'{folder_id}' in parents and trashed=false"
+        results = self.drive_service.files().list(q=query, 
+                                                fields="files(id, name, parents, createdTime, modifiedTime,owners,lastModifyingUser, fileExtension, mimeType)"
+                                                ).execute()
+        items = results.get('files', [])
+        return items
 
-    # def get_modified_files_in_folder(self, folder_id: str, delta_days: int = 7) -> list:
-    #     delta = (pd.Timestamp.today() - pd.Timedelta(days=delta_days)).strftime(
-    #         "%Y-%m-%dT00:00:00"
-    #     )
+    def get_modified_files_in_folder(self, folder_id: str, delta_days: int = 7) -> list:
+        delta = (pd.Timestamp.today() - pd.Timedelta(days=delta_days)).strftime(
+            "%Y-%m-%dT00:00:00"
+        )
 
-    #     all_files = []
-    #     folders_to_check = [folder_id]
+        all_files = []
+        folders_to_check = [folder_id]
 
-    #     while folders_to_check:
-    #         current_folder_id = folders_to_check.pop(0)
-    #         files = self.get_all_files_in_folder(current_folder_id)
+        while folders_to_check:
+            current_folder_id = folders_to_check.pop(0)
+            files = self.get_all_files_in_folder(current_folder_id)
 
-    #         for file in files:
-    #             if file['mimeType'] == 'application/vnd.google-apps.folder':
-    #                 folders_to_check.append(file['id'])
-    #             elif file['mimeType'] != 'application/vnd.google-apps.folder' and (file['modifiedTime'] > delta or file['createdTime'] > delta):
-    #                 all_files.append(file)
+            for file in files:
+                if file['mimeType'] == 'application/vnd.google-apps.folder':
+                    folders_to_check.append(file['id'])
+                elif file['mimeType'] != 'application/vnd.google-apps.folder' and (file['modifiedTime'] > delta or file['createdTime'] > delta):
+                    all_files.append(file)
 
-    #     return all_files
+        return all_files
         

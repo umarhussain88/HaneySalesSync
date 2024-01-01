@@ -1,15 +1,14 @@
 import logging
 import azure.functions as func
-from app import GoogleDrive, PostgresExporter, SalesTransformations
+from app import GoogleDrive, PostgresExporter, SalesTransformations, create_gdrive_service
 from dotenv import load_dotenv
 import json
 import os
-import base64
 import pandas as pd
 import sentry_sdk
 from sentry_sdk.integrations.serverless import serverless_function
 from time import sleep
-import sys
+from pathlib import Path
 
 load_dotenv()
 
@@ -34,45 +33,8 @@ sentry_sdk.init(
 app = func.FunctionApp()
 
 
-st = SalesTransformations()
 
-
-def create_gdrive_service():
-    logging.info("Creating gdrive service")
-    encoded_json_string = os.environ.get("SERVICE_ACCOUNT")
-    decoded_json_string = base64.b64decode(encoded_json_string).decode()
-    decoded_data = json.loads(decoded_json_string)
-    return GoogleDrive(
-        creds=decoded_data,
-    )
-
-
-def create_psql_service():
-    logging.info("Creating psql service")
-    return PostgresExporter(
-        username=os.environ.get("PSQL_USERNAME"),
-        host=os.environ.get("PSQL_SERVER"),
-        port=os.environ.get("PSQL_PORT"),
-        password=os.environ.get("PSQL_PASSWORD"),
-        database=os.environ.get("PSQL_DATABASE"),
-    )
-
-
-def process_file(file: str, gdrive: GoogleDrive, psql: PostgresExporter):
-    uuid = psql.get_uuid_from_table(
-        table_name="drive_metadata",
-        schema="sales_leads",
-        look_up_val=file,
-        look_up_column="id",
-    )
-
-    df = gdrive.get_stream_object(file)
-    df["drive_metadata_uuid"] = uuid["uuid"].values[0]
-    psql.insert_raw_data(df, "leads", "sales_leads")
-    logging.info("Inserted data into leads table")
-
-
-def load_local_settings_as_env_vars(file_path: str):
+def load_local_settings_as_env_vars(file_path: Path):
     with open(file_path) as f:
         data = json.load(f)
 
@@ -81,11 +43,14 @@ def load_local_settings_as_env_vars(file_path: str):
 
 
 if os.environ.get("FUNCTIONS_ENVIRONMENT") == "preview":
-    load_local_settings_as_env_vars("local.settings.dev.json")
+    logging.info('Running in preview mode')
+    logging.info('Loading local settings')
+    local_settings_path = Path(__file__).parent.joinpath("local.settings.dev.json")
+    load_local_settings_as_env_vars(local_settings_path)
 
 
 @serverless_function
-@app.schedule(
+@app.schedule( 
     schedule="*/10 * * * 1-5",
     arg_name="GoogleSalesSync",
     run_on_startup=True,
@@ -95,12 +60,21 @@ def sales_sync(GoogleSalesSync: func.TimerRequest) -> None:
     if GoogleSalesSync.past_due:
         logging.info("The timer is past due!")
 
-    logging.info("Creating gdrive service")
-    gdrive = create_gdrive_service()
+    
+    
+    gdrive = create_gdrive_service(service_account_b64_encoded=os.environ.get("SERVICE_ACCOUNT"))
 
-    psql = create_psql_service()
+    psql = PostgresExporter(
+        username=os.environ.get("PSQL_USERNAME"),
+        password=os.environ.get("PSQL_PASSWORD"),
+        host=os.environ.get("PSQL_SERVER"),
+        port=os.environ.get("PSQL_PORT"),
+        database=os.environ.get("PSQL_DATABASE"),
+    )
 
-    latest_files = gdrive.get_recent_or_modified_files(delta_days=1)
+    st = SalesTransformations(engine=psql.engine)
+    
+    latest_files = gdrive.get_recent_or_modified_files(delta_days=30)
 
     file_dataframe = gdrive.create_file_list_dataframe(
         [latest_files], parent_folder=os.environ.get("PARENT_FOLDER")
@@ -144,10 +118,10 @@ def sales_sync(GoogleSalesSync: func.TimerRequest) -> None:
         psql.get_and_post_missing_config(slack_webhook=os.environ.get("SLACK_WEBHOOK"))
         psql.update_drive_table_slack_posted()
 
-        for file in file_dataframe_new["id"].tolist():
-            process_file(file, gdrive, psql)
+        for file in file_dataframe_new.itertuples():
+            psql.process_file(file.id, gdrive, file.fileExtension)
 
-        new_lead_data = st.get_new_lead_data(psql.engine)
+        new_lead_data = st.get_new_zi_search_lead_data(psql.engine)
 
         sheet_week = f"Week {pd.Timestamp('today').isocalendar().week}"
         if not new_lead_data.empty:
@@ -179,3 +153,5 @@ def sales_sync(GoogleSalesSync: func.TimerRequest) -> None:
             else:
                 logging.info("No new leads to process")
     logging.info("Python timer trigger function executed.")
+
+

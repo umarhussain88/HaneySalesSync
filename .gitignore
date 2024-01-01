@@ -143,3 +143,4 @@ logs/
 /data
 # until i get the ci/cd setup properly
 .github/*
+app/google_drive/dev.py

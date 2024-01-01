@@ -8,7 +8,7 @@ from sqlalchemy.engine import URL
 from notifiers import get_notifier
 import textwrap
 import logging
-from typing import List
+from app.google_drive.drive import GoogleDrive
 
 
 @dataclass
@@ -190,10 +190,15 @@ class PostgresExporter:
         if source_dataframe.empty:
             logging.info('No new files to process')
         else:
-            query = f"""SELECT id, name FROM {schema}.{table_name}"""
+            look_up_vals = source_dataframe[look_up_column].unique().tolist()
+
+            query = f"""
+            
+            SELECT id FROM {schema}.{table_name} WHERE {look_up_column} IN  ({', '.join(f"'{item}'" for item in look_up_vals)})
+            """
 
             current_files = pd.read_sql(query, self.engine)
-            
+
             return source_dataframe.loc[
                 ~source_dataframe[look_up_column].isin(current_files[look_up_column])
             ]
@@ -291,7 +296,9 @@ class PostgresExporter:
             
             filename varchar(255),
             hubspot_owner varchar(255),
-            zi_search varchar(255) )           
+            zi_search varchar(255), 
+            file_type varchar(255)
+            )           
         """
 
         with self.engine.begin() as connection:
@@ -303,7 +310,7 @@ class PostgresExporter:
         else:
             self.create_config_temp_table(temp_table_name="temp_config")
 
-            dataframe.columns = ["filename", "hubspot_owner", "zi_search"]
+            dataframe.columns = ["filename", "hubspot_owner", "zi_search", "file_type"]
 
             dataframe.to_sql(
                 name="temp_config", con=self.engine, if_exists="append", index=False
@@ -314,6 +321,7 @@ class PostgresExporter:
                 SELECT d.uuid
                 , f.hubspot_owner
                 , f.zi_search
+                , f.file_type::file_type_enum
                 , current_timestamp as updated_at
                 FROM sales_leads.drive_metadata d
                 INNER JOIN temp_config f
@@ -321,13 +329,14 @@ class PostgresExporter:
                 WHERE d.config_file_uuid IS NULL -- only update records that have not been updated before.
             )
             INSERT INTO sales_leads.drive_metadata
-            (uuid, hubspot_owner, zi_search, updated_at)
-            SELECT uuid, hubspot_owner, zi_search, updated_at
+            (uuid, hubspot_owner, zi_search, file_type, updated_at)
+            SELECT uuid, hubspot_owner, zi_search, file_type, updated_at
             FROM drive_metadata
             ON CONFLICT (uuid) DO UPDATE
             SET config_file_uuid = gen_random_uuid()
             , hubspot_owner = EXCLUDED.hubspot_owner
             , zi_search = EXCLUDED.zi_search
+            , file_type = EXCLUDED.file_type
             , updated_at = EXCLUDED.updated_at;
             DROP TABLE temp_config;
             """
@@ -342,7 +351,7 @@ class PostgresExporter:
             FROM sales_leads.drive_metadata
             WHERE
             config_file_uuid IS NULL
-            AND has_posted_on_slack IS NULL
+            AND has_posted_on_slack = False
             """,
             self.engine,
         )
@@ -394,3 +403,46 @@ class PostgresExporter:
         
         with self.engine.begin() as connection:
             connection.execute(text(qry))
+            
+    def get_files_to_process(self, ids: list) -> pd.DataFrame:
+        with self.engine.connect() as connection:
+            query = f"""
+            SELECT id, name, file_type
+            FROM sales_leads.drive_metadata
+            WHERE id IN ({', '.join(f"'{item}'" for item in ids)})
+            """
+            return pd.read_sql(query, connection)
+
+    def process_file(self,file_id: str, gdrive: GoogleDrive, file_type: str):
+        
+        uuid = self.get_uuid_from_table(
+            table_name="drive_metadata",
+            schema="sales_leads",
+            look_up_val=file_id,
+            look_up_column="id",
+        )
+
+        stream = gdrive.get_stream_object(file_id)
+        
+        file_ext = gdrive.get_file_type(file_id)
+        
+        if file_ext == "csv":
+            stream.seek(0)
+            df = pd.read_csv(stream)
+        elif file_ext == "xlsx":
+            df = pd.read_excel(stream)
+        
+        df["drive_metadata_uuid"] = uuid["uuid"].values[0]
+        
+        if file_type == "zi_search":
+            self.insert_raw_data(df, "leads", "sales_leads")
+            logging.info("Inserted zi_search data into leads table")
+        elif file_type == "city_search":
+            self.insert_raw_data(df, "city_search", "sales_leads")
+            logging.info("Inserted city_search data into city_search table")
+
+    def filter_file_dataframe_with_file_type(self, file_dataframe: pd.DataFrame) -> pd.DataFrame:
+        
+        file_dataframe_with_file_type = file_dataframe[file_dataframe['file_type'].isnull() == False]
+        
+        return file_dataframe_with_file_type
