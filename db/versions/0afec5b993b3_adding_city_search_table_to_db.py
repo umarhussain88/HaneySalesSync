@@ -56,6 +56,7 @@ def upgrade() -> None:
         sa.Column('serviceoptions_3', sa.String(27)),
         sa.Column('serviceoptions_4', sa.String(25)),
         sa.Column('created_at', sa.DateTime),
+        sa.Columns('updated_at', sa.DateTime, nullable=True),
         schema='sales_leads'
         )
 

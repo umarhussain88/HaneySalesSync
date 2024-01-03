@@ -446,3 +446,41 @@ class PostgresExporter:
         file_dataframe_with_file_type = file_dataframe[file_dataframe['file_type'].isnull() == False]
         
         return file_dataframe_with_file_type
+
+
+    def upsert_franchise_data(self, dataframe : pd.DataFrame, temp_table_name : Optional[str] = 'city_franchises') -> None:
+        
+        temp_table_query = f"""CREATE TEMPORARY TABLE {temp_table_name} (
+              franchise_name varchar(255)
+            ,  domain_name varchar(255)
+            )"""
+        
+        with self.engine.begin() as connection:
+            connection.execute(text(qry))
+        
+        dataframe.to_sql(
+            name=temp_table_name, con=self.engine, if_exists="append", index=False
+        )
+        
+        qry = f"""
+        WITH new_data AS (
+        SELECT tgt.uuid
+        , src.franchise_name
+        , src.domain_name
+        , CURRENT_TIMESTAMP as created_at
+        FROM {temp_table_name} src
+        LEFT JOIN sales_leads.city_search_franchises tgt
+        ON src.franchise_name = tgt.franchise_name
+        
+        )
+        INSERT INTO sales_leads.city_search_franchises (uuid,franchise_name, domain_name, created_at)
+        SELECT franchise_name, domain_name, created_at
+        FROM new_data
+        ON CONFLICT (uuid) DO UPDATE
+        SET   domain_name = EXCLUDED.domain_name
+            , updated_at = CURRENT_TIMESTAMP;
+        DROP TABLE {temp_table_name};
+        """
+        
+        with self.engine.begin() as connection:
+            connection.execute(text(qry)) 

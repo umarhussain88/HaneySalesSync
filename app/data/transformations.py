@@ -1,11 +1,13 @@
 from dataclasses import dataclass
 import pandas as pd
+from . import GoogleDrive 
 
 
 @dataclass
 class SalesTransformations:
     
     engine: str = None
+    google_api : GoogleDrive = None
     target_schema = {
         "First Name": "first_name",
         "Last Name": "last_name",
@@ -75,13 +77,48 @@ class SalesTransformations:
 
         return phone_df 
 
-    def get_new_city_search_lead_data(self):
+    def create_google_sheet_output_for_city_search_data(self) -> pd.DataFrame:
         
-        query = """
-        
-        
+        query = f"""
+        SELECT city.uuid
+            ,  city.type
+            , '' AS "Main Point Of Contact"
+            , '' AS "Main Point of Contact Email"
+            , '' AS "Main Contact Linkedin"
+            , '' AS "Generic Contact Email"
+            , '' AS company_name
+            , city.website
+            , city.phone
+            , city.position
+            , city.rating
+            , city.address
+            , city.reviews
+            , city.emails_0
+            , city.emails_1
+            , city.emails_2
+            , city.emails_3
+            , d.name AS file_name
+        FROM sales_leads.city_search city
+        INNER JOIN sales_leads.drive_metadata d
+          ON d.uuid = city.drive_metadata_uuid
         """
-        pass
+        return pd.read_sql(query, self.engine)
+    
+    def post_city_search_data_to_google_sheet(self, spreadsheet_name : str, folder_id : str):
+        
+        city_search_df = self.create_google_sheet_output_for_city_search_data()
+        
+        target_sheet = city_search_df['file_name'].unique()[0]
+        
+        city_search_df = city_search_df.drop('file_name', axis=1)
+        
+        self.google_api.write_to_google_sheet(
+            dataframe=city_search_df,
+            spreadsheet_name=spreadsheet_name,
+            target_sheet=target_sheet,
+            folder_id=folder_id,
+        )
+    
     
         
 

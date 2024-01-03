@@ -343,3 +343,15 @@ class GoogleDrive:
                                             addParents=file['parents'],
                                             removeParents=previous_parents,
                                             fields='id, parents').execute()
+        
+        
+    def get_franchise_data(self, file_id: str) -> pd.DataFrame:
+        file = self.drive_service.files().get(fileId=file_id, fields='name').execute()
+        file_name = file.get('name')
+        
+        if file_name == 'Franchise Data':
+            downloaded = self.download_file(file_id)
+            return pd.read_excel(downloaded)
+        else:
+            logging.info(f"File {file_name} is not Franchise Data")
+    

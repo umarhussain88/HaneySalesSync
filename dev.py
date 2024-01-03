@@ -33,7 +33,6 @@ if __name__ == '__main__':
         load_local_settings_as_env_vars(local_settings_path)
         
         
-    st = SalesTransformations()
     gdrive = create_gdrive_service(service_account_b64_encoded=os.environ.get("SERVICE_ACCOUNT"))
 
     psql = PostgresExporter(
@@ -43,6 +42,8 @@ if __name__ == '__main__':
         port=os.environ.get("PSQL_PORT"),
         database=os.environ.get("PSQL_DATABASE"),
     )
+    
+    st = SalesTransformations(engine=psql.engine, google_api=gdrive)
 
     #testing all folders from a parent folder.
     all_child_modified_files = gdrive.get_modified_files_in_folder(folder_id=os.environ.get("PARENT_FOLDER"), delta_days=30)
@@ -80,6 +81,7 @@ if __name__ == '__main__':
         for file in files_to_process.itertuples():
             logging.info(f"Processing file: {file.name}")
             psql.process_file(file.id, gdrive, file.file_type)
+            gdrive.move_file_to_processed_folder(file.id)
         
         new_lead_data_zi = st.get_new_zi_search_lead_data(psql.engine)
 
@@ -111,10 +113,17 @@ if __name__ == '__main__':
                     slack_webhook=os.environ.get("SLACK_WEBHOOK"), slack_df=slack_df
                 )
                 
+            
 
             else:
                 logging.info("No new zi_search leads to process")
     
-    
+        franchise_df = gdrive.get_franchise_data(file_id=os.environ.get("FRANCHISE_DATA_FILE_ID"))
+        
+        psql.upsert_franchise_data(dataframe = franchise_df, temp_table_name='temp_franchise_data')
+        
+        st.post_city_search_data_to_google_sheet(f'City Search Output - {sheet_week}', os.environ.get("CITY_SEARCH_OUTPUT_PARENT_FOLDER_ID"))
+
+        
     
     
