@@ -9,6 +9,7 @@ from notifiers import get_notifier
 import textwrap
 import logging
 from app.google_drive.drive import GoogleDrive
+from azure.storage.blob import BlobServiceClient, BlobType
 
 
 @dataclass
@@ -311,6 +312,7 @@ class PostgresExporter:
             self.create_config_temp_table(temp_table_name="temp_config")
 
             dataframe.columns = ["filename", "hubspot_owner", "zi_search", "file_type"]
+            
 
             dataframe.to_sql(
                 name="temp_config", con=self.engine, if_exists="append", index=False
@@ -351,7 +353,7 @@ class PostgresExporter:
             FROM sales_leads.drive_metadata
             WHERE
             config_file_uuid IS NULL
-            AND has_posted_on_slack = False
+            AND has_posted_on_slack IS NULL
             """,
             self.engine,
         )
@@ -373,6 +375,8 @@ class PostgresExporter:
                     message=missing_config_msg,
                     webhook_url=slack_webhook,
                 )
+                
+                self.update_drive_table_slack_posted()
 
     def send_update_slack_metrics(
         self, slack_webhook: str, slack_df: pd.DataFrame
@@ -398,7 +402,7 @@ class PostgresExporter:
         UPDATE sales_leads.drive_metadata
         SET has_posted_on_slack = True
         WHERE config_file_uuid IS NULL
-        AND has_posted_on_slack = False
+        AND has_posted_on_slack IS NULL
         """
         
         with self.engine.begin() as connection:
@@ -413,7 +417,7 @@ class PostgresExporter:
             """
             return pd.read_sql(query, connection)
 
-    def process_file(self,file_id: str, gdrive: GoogleDrive, file_type: str):
+    def process_file(self,file_id: str, gdrive: GoogleDrive, file_type: str) -> pd.DataFrame:
         
         uuid = self.get_uuid_from_table(
             table_name="drive_metadata",
@@ -434,12 +438,17 @@ class PostgresExporter:
         
         df["drive_metadata_uuid"] = uuid["uuid"].values[0]
         
-        if file_type == "zi_search":
-            self.insert_raw_data(df, "leads", "sales_leads")
-            logging.info("Inserted zi_search data into leads table")
-        elif file_type == "city_search":
-            self.insert_raw_data(df, "city_search", "sales_leads")
-            logging.info("Inserted city_search data into city_search table")
+        return df        
+        # if file_type == "zi_search":
+        #     self.insert_raw_data(df, "leads", "sales_leads")
+        #     logging.info("Inserted zi_search data into leads table")
+        # elif file_type == "city_search":
+        #     self.insert_raw_data(df, "city_search", "sales_leads")
+        #     logging.info("Inserted city_search data into city_search table")
+        # else:
+        #     self.insert_raw_data(df, "city_search", "sales_leads") # think about how to handle this in the config table - maybe use parent folder name?
+        #     logging.info("Inserted city_search data into city_search table")
+            
 
     def filter_file_dataframe_with_file_type(self, file_dataframe: pd.DataFrame) -> pd.DataFrame:
         
@@ -456,7 +465,10 @@ class PostgresExporter:
             )"""
         
         with self.engine.begin() as connection:
-            connection.execute(text(qry))
+            connection.execute(text(temp_table_query))
+            
+        
+        dataframe.columns = ['franchise_name', 'domain_name']
         
         dataframe.to_sql(
             name=temp_table_name, con=self.engine, if_exists="append", index=False
@@ -471,10 +483,10 @@ class PostgresExporter:
         FROM {temp_table_name} src
         LEFT JOIN sales_leads.city_search_franchises tgt
         ON src.franchise_name = tgt.franchise_name
-        
+        AND src.domain_name = tgt.domain_name
         )
         INSERT INTO sales_leads.city_search_franchises (uuid,franchise_name, domain_name, created_at)
-        SELECT franchise_name, domain_name, created_at
+        SELECT COALESCE(uuid,gen_random_uuid()),franchise_name, domain_name, created_at
         FROM new_data
         ON CONFLICT (uuid) DO UPDATE
         SET   domain_name = EXCLUDED.domain_name
@@ -483,4 +495,130 @@ class PostgresExporter:
         """
         
         with self.engine.begin() as connection:
-            connection.execute(text(qry)) 
+            connection.execute(text(qry))
+            
+        
+    def post_city_search_slack_message(self,link: str, spread_sheet_name : str, owner: Optional[str] = 'U03K3H773RB'):
+        
+
+        
+        message = f"""Hi <@{owner}>, <{link}|City Search> - {spread_sheet_name} is ready to be disperesed."""
+          
+    
+        notifier = get_notifier("slack")
+        
+        notifier.notify(
+            message=message, webhook_url=os.environ.get("SLACK_WEBHOOK")
+        )
+        
+    def get_missing_file_types(self, gdrive: GoogleDrive) -> pd.DataFrame:
+        
+        missing_files = pd.read_sql(""" SELECT uuid
+                                        , replace(trim(both '[]' from parents), '''','') AS parent
+                                        , name 
+                                    FROM sales_leads.drive_metadata WHERE file_type IS NULL """, self.engine)
+    
+        if not missing_files.empty:
+            d = {}
+            for file in missing_files.itertuples():
+                parent_folder = gdrive.get_parent_folder_name(file.parent)
+                d[file.uuid] = parent_folder
+        
+            missing_files['file_type'] = missing_files['uuid'].map(d)
+            missing_files['file_type'] = missing_files['file_type'].str.strip().str.lower().str.replace(' ', '_')
+            missing_files['file_type'] = missing_files['file_type'].replace('data drop', 'zi_search')
+
+        return pd.DataFrame() if missing_files.empty else missing_files
+        
+         
+    def update_file_types(self, file_dataframe: pd.DataFrame) -> None:
+
+        temp_table_query = f"""CREATE TEMPORARY TABLE missing_file_types (
+              uuid uuid
+            ,  file_type varchar(255)
+            )"""
+        
+        with self.engine.begin() as connection:
+            connection.execute(text(temp_table_query))
+            
+        file_dataframe.columns = ['uuid', 'file_type']
+        
+        file_dataframe.to_sql(
+            name='missing_file_types', con=self.engine, if_exists="append", index=False
+        )
+        
+        update_query = f"""
+        WITH new_data AS (
+            SELECT d.uuid
+            , f.file_type::file_type_enum
+            , current_timestamp as updated_at
+            FROM sales_leads.drive_metadata d
+            INNER JOIN missing_file_types f
+                ON f.uuid = d.uuid
+            WHERE d.file_type IS NULL
+        )
+        INSERT INTO sales_leads.drive_metadata (uuid, file_type, updated_at)
+        SELECT uuid, file_type::file_type_enum, updated_at
+        FROM new_data
+        ON CONFLICT (uuid) DO UPDATE
+        SET file_type = EXCLUDED.file_type
+            , updated_at = EXCLUDED.updated_at;
+        DROP TABLE missing_file_types;"""
+        
+        with self.engine.begin() as connection:
+            connection.execute(text(update_query))
+            
+        
+    def update_file_has_been_processed(self, file_name : str) -> None:
+            
+            with self.engine.connect() as connection:
+                query = f"""
+                UPDATE sales_leads.drive_metadata
+                SET has_been_processed = True
+                WHERE name = '{file_name}'
+                """
+                connection.execute(text(query))
+    
+    def check_if_file_has_been_processed(self,file_name : str) -> bool:
+        
+        with self.engine.connect() as connection:
+            query = f"""
+            SELECT id 
+            FROM sales_leads.drive_metadata 
+            WHERE name = '{file_name}'
+            AND has_been_processed = True
+            """
+            return connection.execute(text(query)).fetchone() is not None
+        
+    
+    def change_file_ext_name_to_csv(self, file_name : str) -> None:
+        query = f"UPDATE sales_leads.drive_metadata SET name = REPLACE(name, \'xlsx\', \'csv\') WHERE name = '{file_name}'"
+        with self.engine.connect() as conn:
+            conn.execute(text(query))
+            
+            
+@dataclass
+class AzureBlobStorage:
+    connection_string: str
+    blob_service_client: BlobServiceClient = None
+
+    def __post_init__(self):
+        self.blob_service_client = BlobServiceClient.from_connection_string(self.connection_string)
+
+    
+    def upload_dataframe(self, dataframe, container_name, blob_name, file_id : Optional[str] = None):
+        blob_client = self.blob_service_client.get_blob_client(container_name, blob_name)
+        blob_client.upload_blob(dataframe.to_csv(index=False),  blob_type=BlobType.BlockBlob, overwrite=True)
+        logging.info(f"Uploaded {blob_name} to {container_name}")
+        
+        if file_id:
+            metadata = {'file_id': file_id}
+            blob_client.set_blob_metadata(metadata)
+        
+    
+    def get_blob_metadata(self, container_name, blob_name):
+        blob_client = self.blob_service_client.get_blob_client(container_name, blob_name)
+        return blob_client.get_blob_properties()
+    
+    def split_and_return_blob_name(self, blob_name : str) -> str:
+        return blob_name.split('/')[-1]

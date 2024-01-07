@@ -1,13 +1,15 @@
 from dataclasses import dataclass
 import pandas as pd
-from . import GoogleDrive 
+from typing import TYPE_CHECKING, Optional, Union, Dict
+
+if TYPE_CHECKING:
+    from ..google_drive.drive import GoogleDrive
 
 
 @dataclass
 class SalesTransformations:
-    
     engine: str = None
-    google_api : GoogleDrive = None
+    google_api: Optional["GoogleDrive"] = None
     target_schema = {
         "First Name": "first_name",
         "Last Name": "last_name",
@@ -21,9 +23,9 @@ class SalesTransformations:
         "ZI Search": "zi_search",
     }
 
-    def get_new_zi_search_lead_data(self) -> pd.DataFrame:
+    def get_new_zi_search_lead_data(self, file_name: str) -> pd.DataFrame:
         df = pd.read_sql(
-            """
+            f"""
                 WITH cte_new_latest_leads AS
                     (
                         SELECT s.*
@@ -51,9 +53,11 @@ class SalesTransformations:
                     ON d.uuid = l.drive_metadata_uuid
                 WHERE row_number = 1
                 AND d.config_file_uuid IS NOT NULL
-                """, self.engine
-                )
-        
+                AND d.name = '{file_name}'
+                """,
+            self.engine,
+        )
+
         return df
 
     def order_duplicate_domains(self):
@@ -66,21 +70,27 @@ class SalesTransformations:
         pass
 
     def create_google_lead_data_frame(self, dataframe: pd.DataFrame) -> pd.DataFrame:
-        
         target_columns = list(self.target_schema.values())
-        
+
         phone_df = dataframe[target_columns].copy()
-        
-        phone_df['phone_number'] = phone_df['phone_number'].fillna('').apply(lambda x : '="' + x + '"')
-        
-        phone_df = phone_df.rename(columns={v : k for k,v in self.target_schema.items()})
 
-        return phone_df 
+        phone_df["phone_number"] = (
+            phone_df["phone_number"].fillna("").apply(lambda x: '="' + x + '"')
+        )
 
-    def create_google_sheet_output_for_city_search_data(self) -> pd.DataFrame:
-        
+        phone_df = phone_df.rename(
+            columns={v: k for k, v in self.target_schema.items()}
+        )
+
+        return phone_df
+
+    def create_google_sheet_output_for_city_search_data(
+        self, file_name: str
+    ) -> pd.DataFrame:
         query = f"""
         SELECT city.uuid
+            , COALESCE(f.franchise_name)  AS franchise_name
+            , COALESCE(f.domain_name)     AS domain_name
             ,  city.type
             , '' AS "Main Point Of Contact"
             , '' AS "Main Point of Contact Email"
@@ -101,25 +111,55 @@ class SalesTransformations:
         FROM sales_leads.city_search city
         INNER JOIN sales_leads.drive_metadata d
           ON d.uuid = city.drive_metadata_uuid
+        LEFT JOIN sales_leads.city_search_franchises f
+          ON replace(COALESCE(substring(f.domain_name from 'https?://([^/]*)'), f.domain_name), 'www.', '') = replace(COALESCE(substring(city.website from 'https?://([^/]*)'), city.website), 'www.', '')
+        WHERE d.name = '{file_name}'
         """
         return pd.read_sql(query, self.engine)
-    
-    def post_city_search_data_to_google_sheet(self, spreadsheet_name : str, folder_id : str):
-        
-        city_search_df = self.create_google_sheet_output_for_city_search_data()
-        
-        target_sheet = city_search_df['file_name'].unique()[0]
-        
-        city_search_df = city_search_df.drop('file_name', axis=1)
-        
-        self.google_api.write_to_google_sheet(
-            dataframe=city_search_df,
+
+    def get_google_sheet_link_by_name(self, spreadsheet_name: str):
+        return self.google_api.get_google_sheet_link_by_name(
+            spreadsheet_name=spreadsheet_name
+        )
+
+    def post_city_search_data_to_google_sheet(
+        self, spreadsheet_name: str, folder_id: str, file_name: str
+    ) -> Dict[str, str]:
+        city_search_df = self.create_google_sheet_output_for_city_search_data(
+            file_name=file_name
+        )
+
+        sheet_url_dict = {}
+        city_search_df["phone"] = (
+            city_search_df["phone"].fillna("").apply(lambda x: '="' + x + '"')
+        )
+
+        city_search_df = city_search_df.drop("file_name", axis=1)
+
+        city_search_df_franchise = city_search_df[
+            city_search_df["franchise_name"].notnull()
+        ]
+        city_search_df_non_franchise = city_search_df[
+            ~city_search_df["franchise_name"].notnull()
+        ]
+        city_search_df_non_franchise = city_search_df_non_franchise.drop(
+            columns=["franchise_name", "domain_name"]
+        )
+
+        url = self.google_api.write_to_google_sheet(
+            dataframe=city_search_df_non_franchise,
             spreadsheet_name=spreadsheet_name,
-            target_sheet=target_sheet,
+            target_sheet=f"{file_name: <30}_non_franchise",
             folder_id=folder_id,
         )
-    
-    
-        
 
+        sheet_url_dict[file_name] = url
 
+        self.google_api.write_to_google_sheet(
+            dataframe=city_search_df_franchise,
+            spreadsheet_name=spreadsheet_name,
+            target_sheet=f"{file_name: <30}_franchise",
+            folder_id=folder_id,
+        )
+
+        return sheet_url_dict

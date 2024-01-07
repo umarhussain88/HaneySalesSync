@@ -190,7 +190,7 @@ class GoogleDrive:
         target_sheet: str,
         folder_id: str,
         replacement_strategy: Optional[str] = "replace",
-    ) -> None:
+    ) -> gspread.Worksheet.url:
         worksheet = self.get_spreadsheet(
             spreadsheet_name=spreadsheet_name, worksheet_name=target_sheet, folder_id=folder_id
         )
@@ -209,6 +209,8 @@ class GoogleDrive:
             row=rc,
             include_column_header=include_headers,
         )
+        
+        return worksheet.url
 
     def get_file_config(
         self, config_name_spreadsheet_name: str, folder_id: str
@@ -340,7 +342,7 @@ class GoogleDrive:
         previous_parents = ",".join(file.get('parents'))
         file['parents'] = [self.get_processed_folder_id(file_id)]
         file = self.drive_service.files().update(fileId=file_id,
-                                            addParents=file['parents'],
+                                            addParents=file['parents'][0],
                                             removeParents=previous_parents,
                                             fields='id, parents').execute()
         
@@ -349,9 +351,8 @@ class GoogleDrive:
         file = self.drive_service.files().get(fileId=file_id, fields='name').execute()
         file_name = file.get('name')
         
-        if file_name == 'Franchise Data':
-            downloaded = self.download_file(file_id)
-            return pd.read_excel(downloaded)
+        if file_name.strip() == 'FRANCHISE Master List':
+            return pd.DataFrame(self.client.open_by_key(file_id).sheet1.get_all_records())
         else:
             logging.info(f"File {file_name} is not Franchise Data")
     
