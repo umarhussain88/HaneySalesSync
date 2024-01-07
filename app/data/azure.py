@@ -571,13 +571,14 @@ class PostgresExporter:
         
     def update_file_has_been_processed(self, file_name : str) -> None:
             
-            with self.engine.connect() as connection:
-                query = f"""
+        query = f"""
                 UPDATE sales_leads.drive_metadata
                 SET has_been_processed = True
                 WHERE name = '{file_name}'
-                """
-                connection.execute(text(query))
+                """ 
+        with self.engine.begin() as connection:
+            connection.execute(text(query))
+            
     
     def check_if_file_has_been_processed(self,file_name : str) -> bool:
         

@@ -75,7 +75,7 @@ sheet_week = f"Week {pd.Timestamp('today').isocalendar().week}"
 @app.schedule(
     schedule="*/10 * * * 1-5",
     arg_name="GoogleSalesSync",
-    run_on_startup=True,
+    run_on_startup=False,
     use_monitor=False,
 )
 def sales_sync(GoogleSalesSync: func.TimerRequest) -> None:
@@ -90,7 +90,7 @@ def sales_sync(GoogleSalesSync: func.TimerRequest) -> None:
 
     # testing all folders from a parent folder.
     all_child_modified_files = gdrive.get_modified_files_in_folder(
-        folder_id=os.environ.get("PARENT_FOLDER"), delta_days=60
+        folder_id=os.environ.get("PARENT_FOLDER"), delta_days=1
     )
 
     file_dataframe_all = gdrive.create_file_list_dataframe(
@@ -133,6 +133,7 @@ def sales_sync(GoogleSalesSync: func.TimerRequest) -> None:
             parent_folder = gdrive.get_parent_folder(file.id)
             parent_name = gdrive.get_parent_folder_name(parent_folder[0])
             parent_name = parent_name.replace(" ", "_").lower().strip()
+            sleep(5)
             az.upload_dataframe(
                 dataframe=dataframe,
                 container_name=f"salesfiles/{parent_name}",
@@ -160,7 +161,7 @@ def ZiSearchBlobTrigger(myblob: func.InputStream):
         blob_str = myblob.read().decode()
         logging.info(f"Processing file: {file_name}")
         df = pd.read_csv(io.StringIO(blob_str))
-        psql.insert_raw_data(dataset=df, table_name="zi_search", schema="sales_leads")
+        psql.insert_raw_data(dataset=df, table_name="leads", schema="sales_leads") 
         new_lead_data_zi = st.get_new_zi_search_lead_data(file_name=file_name)
 
     if not new_lead_data_zi.empty:
@@ -187,6 +188,8 @@ def ZiSearchBlobTrigger(myblob: func.InputStream):
         psql.send_update_slack_metrics(
             slack_webhook=os.environ.get("SLACK_WEBHOOK"), slack_df=slack_df
         )
+        
+        psql.update_file_has_been_processed(file_name=file_name)
 
 
 @app.blob_trigger(
@@ -237,3 +240,22 @@ def CitySearchEnrichedBlogTrigger(myblob: func.InputStream):
     logging.info(f"Python blob trigger function processed blob"
                 f"Name: {myblob.name}"
                 f"Blob Size: {myblob.length} bytes")
+
+    file_name = az.split_and_return_blob_name(myblob.name)
+    file_name = file_name.replace('csv', 'xlsx') # TODO: remove this once I add in blob metadata and use that to filter for data.
+    has_file_been_processed = psql.check_if_file_has_been_processed(file_name=file_name)
+    
+    if not has_file_been_processed:
+        logging.info(f'Processing city search enriched data for {file_name}')
+        blob_bytes = myblob.read()
+        df = pd.read_csv(io.BytesIO(blob_bytes))
+        df.columns.str.strip()
+        if 'drive_metadata_uuid' in df.columns:
+            logging.info('drive_metadata_uuid column found')
+            df = df.drop(columns=['drive_metadata_uuid'])
+        
+        psql.insert_raw_data(df, "city_search_enriched", "sales_leads")
+        
+        
+        
+
