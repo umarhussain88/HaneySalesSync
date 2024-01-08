@@ -93,52 +93,55 @@ def sales_sync(GoogleSalesSync: func.TimerRequest) -> None:
         folder_id=os.environ.get("PARENT_FOLDER"), delta_days=1
     )
 
-    file_dataframe_all = gdrive.create_file_list_dataframe(
-        all_child_modified_files, record_path=None
-    )
-    logging.info(f"Number of files edited: {file_dataframe_all.shape[0]}")
-    file_config = gdrive.get_file_config(
-        os.environ.get("QUICK_MAIL_CONFIG_NAME"),
-        folder_id=os.environ.get("QUICK_MAIL_CONFIG_FOLDER_ID"),
-    )
-    file_dataframe_new = psql.check_if_record_exists(
-        table_name="drive_metadata",
-        schema="sales_leads",
-        source_dataframe=file_dataframe_all,
-        look_up_column="id",
-    )
-
-    if not file_dataframe_new.empty:
-        logging.info("New files to process")
-        psql.insert_raw_data(
-            dataset=file_dataframe_all.drop(columns=["mimeType"]),
+    if all_child_modified_files:
+        file_dataframe_all = gdrive.create_file_list_dataframe(
+            all_child_modified_files, record_path=None
+        )
+        logging.info(f"Number of files edited: {file_dataframe_all.shape[0]}")
+        file_config = gdrive.get_file_config(
+            os.environ.get("QUICK_MAIL_CONFIG_NAME"),
+            folder_id=os.environ.get("QUICK_MAIL_CONFIG_FOLDER_ID"),
+        )
+        file_dataframe_new = psql.check_if_record_exists(
             table_name="drive_metadata",
             schema="sales_leads",
+            source_dataframe=file_dataframe_all,
+            look_up_column="id",
         )
 
-    missing_file_types = psql.get_missing_file_types(gdrive=gdrive)
-    if not missing_file_types.empty:
-        psql.update_file_types(missing_file_types[["uuid", "file_type"]])
-
-    psql.get_and_post_missing_config(slack_webhook=os.environ.get("SLACK_WEBHOOK"))
-    psql.update_config_metadata(file_config)
-
-    if not file_dataframe_new.empty:
-        logging.info("Processing new files")
-        files_to_process = psql.get_files_to_process(file_dataframe_new["id"].tolist())
-
-        for file in files_to_process.itertuples():
-            logging.info(f"Processing file: {file.name}")
-            dataframe = psql.process_file(file.id, gdrive, file.file_type)
-            parent_folder = gdrive.get_parent_folder(file.id)
-            parent_name = gdrive.get_parent_folder_name(parent_folder[0])
-            parent_name = parent_name.replace(" ", "_").lower().strip()
-            sleep(5)
-            az.upload_dataframe(
-                dataframe=dataframe,
-                container_name=f"salesfiles/{parent_name}",
-                blob_name=file.name.replace("xlsx", "csv"),
+        if not file_dataframe_new.empty:
+            logging.info("New files to process")
+            psql.insert_raw_data(
+                dataset=file_dataframe_all.drop(columns=["mimeType"]),
+                table_name="drive_metadata",
+                schema="sales_leads",
             )
+
+        missing_file_types = psql.get_missing_file_types(gdrive=gdrive)
+        if not missing_file_types.empty:
+            psql.update_file_types(missing_file_types[["uuid", "file_type"]])
+
+        psql.update_config_metadata(file_config)
+        psql.get_and_post_missing_config(slack_webhook=os.environ.get("SLACK_WEBHOOK"))
+
+        if not file_dataframe_new.empty:
+            logging.info("Processing new files")
+            files_to_process = psql.get_files_to_process(file_dataframe_new["id"].tolist())
+
+            for file in files_to_process.itertuples():
+                logging.info(f"Processing file: {file.name}")
+                dataframe = psql.process_file(file.id, gdrive, file.file_type)
+                parent_folder = gdrive.get_parent_folder(file.id)
+                parent_name = gdrive.get_parent_folder_name(parent_folder[0])
+                parent_name = parent_name.replace(" ", "_").lower().strip()
+                sleep(5)
+                az.upload_dataframe(
+                    dataframe=dataframe,
+                    container_name=f"salesfiles/{parent_name}",
+                    blob_name=file.name.replace("xlsx", "csv"),
+                )
+    else:
+        logging.info("No files to process")
 
 
 
@@ -164,32 +167,32 @@ def ZiSearchBlobTrigger(myblob: func.InputStream):
         psql.insert_raw_data(dataset=df, table_name="leads", schema="sales_leads") 
         new_lead_data_zi = st.get_new_zi_search_lead_data(file_name=file_name)
 
-    if not new_lead_data_zi.empty:
-        sheet_data = st.create_google_lead_data_frame(new_lead_data_zi)
-        uuid = new_lead_data_zi["drive_metadata_uuid"].values[0]
-        logging.info(f"uuid: {uuid} for {file_name}")
+        if not new_lead_data_zi.empty:
+            sheet_data = st.create_google_lead_data_frame(new_lead_data_zi)
+            uuid = new_lead_data_zi["drive_metadata_uuid"].values[0]
+            logging.info(f"uuid: {uuid} for {file_name}")
 
-        logging.info(f"Writing {file_name} to google sheet")
-        gdrive.write_to_google_sheet(
-            dataframe=sheet_data,
-            spreadsheet_name=f"Quick Mail Output - {sheet_week}",
-            target_sheet=file_name,
-            folder_id=os.environ.get("QUICK_MAIL_OUTPUT_PARENT_FOLDER_ID"),
-        )
-        logging.info("Wrote data to google sheet")
+            logging.info(f"Writing {file_name} to google sheet")
+            gdrive.write_to_google_sheet(
+                dataframe=sheet_data,
+                spreadsheet_name=f"Quick Mail Output - {sheet_week}",
+                target_sheet=file_name,
+                folder_id=os.environ.get("QUICK_MAIL_OUTPUT_PARENT_FOLDER_ID"),
+            )
+            logging.info("Wrote data to google sheet")
 
-        psql.update_tracking_table(uuid)
-        logging.info("Updated tracking table")
+            psql.update_tracking_table(uuid)
+            logging.info("Updated tracking table")
 
-        psql.update_tracking_table_shopify_customer(drive_metadata_uuid=uuid)
-        logging.info("Updated tracking table for shopify customer")
+            psql.update_tracking_table_shopify_customer(drive_metadata_uuid=uuid)
+            logging.info("Updated tracking table for shopify customer")
 
-        slack_df = psql.get_slack_channel_metrics(drive_metadata_uuid=uuid)
-        psql.send_update_slack_metrics(
-            slack_webhook=os.environ.get("SLACK_WEBHOOK"), slack_df=slack_df
-        )
-        
-        psql.update_file_has_been_processed(file_name=file_name)
+            slack_df = psql.get_slack_channel_metrics(drive_metadata_uuid=uuid)
+            psql.send_update_slack_metrics(
+                slack_webhook=os.environ.get("SLACK_WEBHOOK"), slack_df=slack_df
+            )
+            
+            psql.update_file_has_been_processed(file_name=file_name)
 
 
 @app.blob_trigger(

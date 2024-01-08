@@ -56,15 +56,18 @@ if __name__ == '__main__':
     
     st = SalesTransformations(engine=psql.engine, google_api=gdrive)
     
-    df = pd.read_csv('/mnt/c/Users/umarh/OneDrive/Downloads/122123 - Jackson County MO - CS Search.csv - Scrape-it Cloud Data.csv')
+    all_child_modified_files = gdrive.get_modified_files_in_folder(
+        folder_id=os.environ.get("PARENT_FOLDER"), delta_days=1
+    )
     
-    if 'drive_metadata_uuid' in df.columns:
-        logging.info('drive_metadata_uuid column found')
-        df = df.drop(columns=['drive_metadata_uuid'])
+    uuids = ['e89680ae-ecb2-401d-819e-1793aaf44858', 'd078589f-87ba-4068-bbbf-4f23840c8f3e', '5088af5b-152f-4f10-b527-f5e2a72aff38']
     
-    df.to_sql('city_search_enriched', psql.engine, schema='sales_leads', if_exists='append', index=False)
-    
-    
+    for uuid in uuids:
+        logging.info(f'Processing {uuid}')
+        slack_df = psql.get_slack_channel_metrics(drive_metadata_uuid=uuid)
+        psql.send_update_slack_metrics(
+                slack_webhook=os.environ.get("SLACK_WEBHOOK"), slack_df=slack_df
+            )
+            
         
-    
     
