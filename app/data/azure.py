@@ -238,6 +238,30 @@ class PostgresExporter:
         with self.engine.begin() as connection:
             connection.execute(text(qry))
 
+    def update_city_search_tracking_table(self, drive_metadata_uuid: str) -> None:
+        """
+        Get the assoicated UUID and write an update statement
+        to the tracking table.
+        """
+
+        qry = f"""
+        WITH new_data AS (
+            SELECT COALESCE(l.main_point_of_contact_email, l.generic_contact_email) AS email_address
+            , l.uuid as city_search_lead_uuid
+            , 'posted' as status
+            FROM sales_leads.city_search_enriched l
+            WHERE l.drive_metadata_uuid = '{drive_metadata_uuid}'
+            AND COALESCE(l.main_point_of_contact_email, l.generic_contact_email) IS NOT NULL
+        )
+        INSERT INTO sales_leads.tracking
+        (city_search_lead_uuid, status, email_address, created_at)
+        SELECT city_search_lead_uuid, status::status_enum, email_address, CURRENT_TIMESTAMP
+        FROM new_data
+        WHERE city_search_lead_uuid NOT IN (SELECT city_search_lead_uuid FROM sales_leads.tracking);
+        """
+
+        with self.engine.begin() as connection:
+            connection.execute(text(qry))
     def update_tracking_table_shopify_customer(self, drive_metadata_uuid: str) -> None:
         
         
@@ -271,8 +295,42 @@ class PostgresExporter:
             """
 
             connection.execute(text(qry))
+            
+    def update_city_search_tracking_table_shopify_customer(self, drive_metadata_uuid: str) -> None:
+        
+        
+        with self.engine.begin() as connection:
+            qry = f"""WITH new_data AS (
+                SELECT  tracking.uuid 
+                , COALESCE(l.main_point_of_contact_email, l.generic_contact_email) AS email_address
+                , l.uuid as city_search_lead_uuid
+                , 'shopify_customer' as status
+                FROM sales_leads.city_search_enriched l
+                INNER JOIN dm_shopify.sales_customer_view scv
+                ON COALESCE(l.main_point_of_contact_email, l.generic_contact_email) = scv.email
+                LEFT JOIN sales_leads.tracking
+                  ON l.uuid = tracking.city_search_lead_uuid
+                WHERE drive_metadata_uuid = '{drive_metadata_uuid}'
+                AND (tracking.city_search_lead_uuid IS NULL
+                    OR tracking.status = 'posted') 
+                    -- we check for shopify customers AFTER they have been posted
+                    -- so we want to update these records
+                )
+    
+                INSERT INTO sales_leads.tracking
+                (uuid, city_search_lead_uuid, status, email_address, created_at)
+                SELECT uuid, city_search_lead_uuid, status::status_enum, email_address, CURRENT_TIMESTAMP
+                FROM new_data
+                ON CONFLICT (uuid)
+                DO UPDATE
+                SET status = EXCLUDED.status
+                  , created_at = CURRENT_TIMESTAMP
+                ;
+            """
 
-    def get_slack_channel_metrics(self, drive_metadata_uuid : str) -> pd.DataFrame:
+            connection.execute(text(qry))
+
+    def get_slack_channel_metrics_zi_search(self, drive_metadata_uuid : str) -> pd.DataFrame:
         return pd.read_sql(
             f""" 
                      SELECT d.name
@@ -287,6 +345,23 @@ class PostgresExporter:
                      WHERE l.drive_metadata_uuid IN ('{drive_metadata_uuid}')
                      GROUP BY d.name, d.created_at
                      
+                           """,
+            self.engine,
+        )
+    def get_slack_channel_metrics_city_search(self, drive_metadata_uuid : str) -> pd.DataFrame:
+        return pd.read_sql(
+            f""" 
+                     SELECT d.name
+                          , SUM(CASE WHEN tracking.status = 'shopify_customer' THEN 1 ELSE 0 END) AS number_of_shopify_customers
+                          , SUM(CASE WHEN tracking.status = 'posted' THEN 1 ELSE 0 END)           AS number_of_posted_leads
+                          , d.created_at
+                     FROM sales_leads.tracking
+                       LEFT JOIN sales_leads.city_search_enriched          l
+                         ON l.uuid = tracking.city_search_lead_uuid
+                       LEFT JOIN sales_leads.drive_metadata d
+                         ON d.uuid = l.drive_metadata_uuid
+                     WHERE l.drive_metadata_uuid IN ('{drive_metadata_uuid}')
+                     GROUP BY d.name, d.created_at
                            """,
             self.engine,
         )
@@ -354,6 +429,7 @@ class PostgresExporter:
             WHERE
             config_file_uuid IS NULL
             AND has_posted_on_slack IS NULL
+            AND file_type NOT IN ('city_search')
             """,
             self.engine,
         )
@@ -379,7 +455,7 @@ class PostgresExporter:
                 self.update_drive_table_slack_posted()
 
     def send_update_slack_metrics(
-        self, slack_webhook: str, slack_df: pd.DataFrame
+        self, slack_webhook: str, slack_df: pd.DataFrame, sheet_name : Optional[str] = '', sheet_url : Optional[str] = ''
     ) -> None:
         for group, data in slack_df.groupby("name"):
             message = textwrap.dedent(
@@ -389,6 +465,9 @@ class PostgresExporter:
             Number of Shopify Customers: {data['number_of_shopify_customers'].values[0]}
             """
             )
+            
+            if sheet_name != '':
+                message = message + f"\nSpreadsheet: <{sheet_url}|{sheet_name}>"
 
             notifier = get_notifier("slack")
             logging.info(message)
@@ -417,7 +496,9 @@ class PostgresExporter:
             """
             return pd.read_sql(query, connection)
 
-    def process_file(self,file_id: str, gdrive: GoogleDrive, file_type: str) -> pd.DataFrame:
+    def process_file(self,file_id: str, gdrive: GoogleDrive) -> pd.DataFrame:
+        
+
         
         uuid = self.get_uuid_from_table(
             table_name="drive_metadata",
@@ -436,18 +517,13 @@ class PostgresExporter:
         elif file_ext == "xlsx":
             df = pd.read_excel(stream)
         
+        if "drive_metadata_uuid" in df.columns:
+            logging.info("drive_metadata_uuid column found for some reason, sometimes the sales teams adds this from other lead generated files..")
+            df = df.drop(columns=["drive_metadata_uuid"])
+        
         df["drive_metadata_uuid"] = uuid["uuid"].values[0]
         
         return df        
-        # if file_type == "zi_search":
-        #     self.insert_raw_data(df, "leads", "sales_leads")
-        #     logging.info("Inserted zi_search data into leads table")
-        # elif file_type == "city_search":
-        #     self.insert_raw_data(df, "city_search", "sales_leads")
-        #     logging.info("Inserted city_search data into city_search table")
-        # else:
-        #     self.insert_raw_data(df, "city_search", "sales_leads") # think about how to handle this in the config table - maybe use parent folder name?
-        #     logging.info("Inserted city_search data into city_search table")
             
 
     def filter_file_dataframe_with_file_type(self, file_dataframe: pd.DataFrame) -> pd.DataFrame:
@@ -569,24 +645,24 @@ class PostgresExporter:
             connection.execute(text(update_query))
             
         
-    def update_file_has_been_processed(self, file_name : str) -> None:
+    def update_file_has_been_processed(self, file_id : str) -> None:
             
         query = f"""
                 UPDATE sales_leads.drive_metadata
                 SET has_been_processed = True
-                WHERE name = '{file_name}'
+                WHERE id = '{file_id}'
                 """ 
         with self.engine.begin() as connection:
             connection.execute(text(query))
             
     
-    def check_if_file_has_been_processed(self,file_name : str) -> bool:
+    def check_if_file_has_been_processed(self,file_id : str) -> bool:
         
         with self.engine.connect() as connection:
             query = f"""
             SELECT id 
             FROM sales_leads.drive_metadata 
-            WHERE name = '{file_name}'
+            WHERE id = '{file_id}'
             AND has_been_processed = True
             """
             return connection.execute(text(query)).fetchone() is not None
@@ -596,6 +672,7 @@ class PostgresExporter:
         query = f"UPDATE sales_leads.drive_metadata SET name = REPLACE(name, \'xlsx\', \'csv\') WHERE name = '{file_name}'"
         with self.engine.connect() as conn:
             conn.execute(text(query))
+            
             
             
 @dataclass
@@ -623,3 +700,20 @@ class AzureBlobStorage:
     
     def split_and_return_blob_name(self, blob_name : str) -> str:
         return blob_name.split('/')[-1]
+    
+    def read_blob_to_dataframe(self, container_name, blob_name):
+        blob_client = self.blob_service_client.get_blob_client(container_name, blob_name)
+        stream = blob_client.download_blob()
+        return pd.read_csv(stream.content_as_text())
+    
+    def get_blob_from_container(self, container_name, blob_name):
+        blob_client = self.blob_service_client.get_blob_client(container_name, blob_name)
+        return blob_client.download_blob()
+    
+    def get_blob_metadata(self, container_name, blob_name):
+        blob_client = self.blob_service_client.get_blob_client(container_name, blob_name)
+        return blob_client.get_blob_properties()
+    
+    def list_blobs(self, container_name):
+        container_client = self.blob_service_client.get_container_client(container_name)
+        return container_client.list_blobs()

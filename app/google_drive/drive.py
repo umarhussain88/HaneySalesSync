@@ -356,3 +356,5 @@ class GoogleDrive:
         else:
             logging.info(f"File {file_name} is not Franchise Data")
     
+    def get_spread_name_by_url(self, url: str) -> str:
+        return self.client.open_by_url(url).title

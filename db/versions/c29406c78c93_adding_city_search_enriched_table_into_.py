@@ -27,8 +27,13 @@ def upgrade() -> None:
             primary_key=True,
             server_default=sa.text("gen_random_uuid()"),
         ),
+        sa.Column("drive_metadata_uuid", sa.dialects.postgresql.UUID(), nullable=False),
+        sa.ForeignKeyConstraint(
+            ["drive_metadata_uuid"], ["sales_leads.drive_metadata.uuid"]
+        ),
         sa.Column("type", sa.VARCHAR(512)),
-        sa.Column("main_point_of_contact", sa.VARCHAR(512)),
+        sa.Column("first_name", sa.VARCHAR(512)),
+        sa.Column("last_name", sa.VARCHAR(512)),
         sa.Column("main_point_of_contact_email", sa.VARCHAR(512)),
         sa.Column("main_contact_linkedin", sa.VARCHAR(512)),
         sa.Column("generic_contact_email", sa.VARCHAR(512)),

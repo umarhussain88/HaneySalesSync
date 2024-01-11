@@ -59,30 +59,75 @@ class SalesTransformations:
         )
 
         return df
+    
 
-    def order_duplicate_domains(self):
-        """With duplicate domains, we don't want to exclude them and not email
-        them in the same group.
+    def get_new_city_search_lead_data(self,file_id : str) -> pd.DataFrame:
+        
+        query = f"""WITH cte_new_latest_leads AS (
+         SELECT s.*
+              , ROW_NUMBER()
+                OVER (PARTITION BY COALESCE(s.main_point_of_contact_email, s.generic_contact_email) ORDER BY s.created_at DESC) AS row_number
+         FROM sales_leads.city_search_enriched      s
+           LEFT JOIN dm_shopify.sales_customer_view c
+             ON COALESCE(s.main_point_of_contact_email, s.generic_contact_email) = c.email
+           LEFT JOIN sales_leads.tracking           t
+             ON t.city_search_lead_uuid = s.uuid
+           LEFT JOIN sales_leads.tracking           t1
+             ON t1.email_address = COALESCE(s.main_point_of_contact_email, s.generic_contact_email)
+         WHERE
+             c.email IS NULL -- not seen this customer before
+         AND t.uuid IS NULL -- and not sent this record previously.
+         AND COALESCE(s.main_point_of_contact_email, s.generic_contact_email) IS NOT NULL -- filter out blank emails.
+         AND t1.email_address IS NULL
+             )
 
-        Still need to figure out how we group them, maybe an index and sort the duplicate email
-        and the start of each index mod % 10?
-        """
-        pass
+            SELECT first_name
+                , last_name
+                , ''                                                           AS job_title
+                , ''                                                           AS job_function
+                , COALESCE(main_point_of_contact_email, generic_contact_email) AS email_address
+                , main_contact_linkedin
+                , company_name
+                , phone                                                        AS phone_number
+                , d.zi_search
+                , d.hubspot_owner
+                , d.name                                                       AS file_name
+                , l.drive_metadata_uuid
+            FROM cte_new_latest_leads              l
+            LEFT JOIN sales_leads.drive_metadata d
+                ON d.uuid = l.drive_metadata_uuid
+            WHERE
+                row_number = 1
+            AND d.config_file_uuid IS NOT NULL
+            AND d.id =  '{file_id}' """
+            
+        return pd.read_sql(query, self.engine)
+
+
+    def check_if_columns_exist_if_not_create(self, dataframe : pd.DataFrame, target_columns : list):
+        
+        for column in target_columns:
+            if column not in dataframe.columns:
+                dataframe[column] = pd.NA
+        return dataframe
+        
 
     def create_google_lead_data_frame(self, dataframe: pd.DataFrame) -> pd.DataFrame:
         target_columns = list(self.target_schema.values())
+        
+        quick_mail_df = self.check_if_columns_exist_if_not_create(dataframe, target_columns)
 
-        phone_df = dataframe[target_columns].copy()
+        quick_mail_df = dataframe[target_columns].copy()
 
-        phone_df["phone_number"] = (
-            phone_df["phone_number"].fillna("").apply(lambda x: '="' + x + '"')
+        quick_mail_df["phone_number"] = (
+            quick_mail_df["phone_number"].fillna("").apply(lambda x: '="' + x + '"')
         )
 
-        phone_df = phone_df.rename(
+        quick_mail_df = quick_mail_df.rename(
             columns={v: k for k, v in self.target_schema.items()}
         )
 
-        return phone_df
+        return quick_mail_df
 
     def create_google_sheet_output_for_city_search_data(
         self, file_name: str

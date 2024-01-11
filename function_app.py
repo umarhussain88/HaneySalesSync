@@ -126,11 +126,13 @@ def sales_sync(GoogleSalesSync: func.TimerRequest) -> None:
 
         if not file_dataframe_new.empty:
             logging.info("Processing new files")
-            files_to_process = psql.get_files_to_process(file_dataframe_new["id"].tolist())
+            files_to_process = psql.get_files_to_process(
+                file_dataframe_new["id"].tolist()
+            )
 
             for file in files_to_process.itertuples():
                 logging.info(f"Processing file: {file.name}")
-                dataframe = psql.process_file(file.id, gdrive, file.file_type)
+                dataframe = psql.process_file(file.id, gdrive)
                 parent_folder = gdrive.get_parent_folder(file.id)
                 parent_name = gdrive.get_parent_folder_name(parent_folder[0])
                 parent_name = parent_name.replace(" ", "_").lower().strip()
@@ -139,10 +141,10 @@ def sales_sync(GoogleSalesSync: func.TimerRequest) -> None:
                     dataframe=dataframe,
                     container_name=f"salesfiles/{parent_name}",
                     blob_name=file.name.replace("xlsx", "csv"),
+                    file_id=file.id,
                 )
     else:
         logging.info("No files to process")
-
 
 
 @app.blob_trigger(
@@ -157,14 +159,23 @@ def ZiSearchBlobTrigger(myblob: func.InputStream):
         f"Blob Size: {myblob.length} bytes"
     )
 
+
+    blob_name_without_container = myblob.name.replace("salesfiles/", "")
+    blob_metadata = az.get_blob_metadata(container_name='salesfiles', blob_name=blob_name_without_container)
+    
+    file_id = blob_metadata["metadata"]["file_id"]
+
     file_name = az.split_and_return_blob_name(myblob.name)
-    has_file_been_processed = psql.check_if_file_has_been_processed(file_name=file_name)
+
+    has_file_been_processed = psql.check_if_file_has_been_processed(file_id=file_id)
 
     if not has_file_been_processed:
+        
+         
         blob_str = myblob.read().decode()
         logging.info(f"Processing file: {file_name}")
         df = pd.read_csv(io.StringIO(blob_str))
-        psql.insert_raw_data(dataset=df, table_name="leads", schema="sales_leads") 
+        psql.insert_raw_data(dataset=df, table_name="leads", schema="sales_leads")
         new_lead_data_zi = st.get_new_zi_search_lead_data(file_name=file_name)
 
         if not new_lead_data_zi.empty:
@@ -187,12 +198,12 @@ def ZiSearchBlobTrigger(myblob: func.InputStream):
             psql.update_tracking_table_shopify_customer(drive_metadata_uuid=uuid)
             logging.info("Updated tracking table for shopify customer")
 
-            slack_df = psql.get_slack_channel_metrics(drive_metadata_uuid=uuid)
+            slack_df = psql.get_slack_channel_metrics_zi_search(drive_metadata_uuid=uuid)
             psql.send_update_slack_metrics(
                 slack_webhook=os.environ.get("SLACK_WEBHOOK"), slack_df=slack_df
             )
-            
-            psql.update_file_has_been_processed(file_name=file_name)
+
+            psql.update_file_has_been_processed(file_id=file_id)
 
 
 @app.blob_trigger(
@@ -207,15 +218,21 @@ def CitySearchBlogTrigger(myblob: func.InputStream):
         f"Blob Size: {myblob.length} bytes"
     )
 
-    file_name = az.split_and_return_blob_name(myblob.name)
-    file_name = file_name.replace('csv', 'xlsx') # TODO: remove this once I add in blob metadata and use that to filter for data.
-    has_file_been_processed = psql.check_if_file_has_been_processed(file_name=file_name)
+    blob_name_without_container = myblob.name.replace("salesfiles/", "")
+    blob_metadata = az.get_blob_metadata(container_name='salesfiles', blob_name=blob_name_without_container)
+    
+    file_id = blob_metadata["metadata"]["file_id"]
 
-    logging.info('Getting franchise data')
+    file_name = az.split_and_return_blob_name(myblob.name)
+
+    has_file_been_processed = psql.check_if_file_has_been_processed(file_id=file_id)
+
+
+    logging.info("Getting franchise data")
     franchise_df = gdrive.get_franchise_data(
         file_id=os.environ.get("FRANCHISE_MASTER_LIST_FILE_ID")
     )
-    logging.info('Upserting franchise data')
+    logging.info("Upserting franchise data")
     psql.upsert_franchise_data(
         dataframe=franchise_df, temp_table_name="temp_franchise_data"
     )
@@ -229,36 +246,85 @@ def CitySearchBlogTrigger(myblob: func.InputStream):
         sheet_url_dict = st.post_city_search_data_to_google_sheet(
             spreadsheet_name=f"City Search Output - {sheet_week}",
             folder_id=os.environ.get("CITY_SEARCH_OUTPUT_PARENT_FOLDER_ID"),
-            file_name=file_name, 
+            file_name=file_name,
         )
         psql.post_city_search_slack_message(
             link=sheet_url_dict[file_name], spread_sheet_name=file_name
         )
-        
-        psql.update_file_has_been_processed(file_name=file_name)
+
+        psql.update_file_has_been_processed(file_id=file_id)
 
 
-@app.blob_trigger(arg_name="myblob", path="salesfiles/city_search_enriched/{name}.csv", connection="SalesSyncBlogTrigger")
+@app.blob_trigger(
+    arg_name="myblob",
+    path="salesfiles/city_search_enriched/{name}.csv",
+    connection="SalesSyncBlogTrigger",
+    
+)
 def CitySearchEnrichedBlogTrigger(myblob: func.InputStream):
-    logging.info(f"Python blob trigger function processed blob"
-                f"Name: {myblob.name}"
-                f"Blob Size: {myblob.length} bytes")
+    logging.info(
+        f"Python blob trigger function processed blob"
+        f"Name: {myblob.name}"
+        f"Blob Size: {myblob.length} bytes"
+    )
+
+    blob_name_without_container = myblob.name.replace("salesfiles/", "")
+    blob_metadata = az.get_blob_metadata(container_name='salesfiles', blob_name=blob_name_without_container)
+    
+    file_id = blob_metadata["metadata"]["file_id"]
 
     file_name = az.split_and_return_blob_name(myblob.name)
-    file_name = file_name.replace('csv', 'xlsx') # TODO: remove this once I add in blob metadata and use that to filter for data.
-    has_file_been_processed = psql.check_if_file_has_been_processed(file_name=file_name)
-    
+
+    has_file_been_processed = psql.check_if_file_has_been_processed(file_id=file_id)
+
     if not has_file_been_processed:
-        logging.info(f'Processing city search enriched data for {file_name}')
+        logging.info(f"Processing city search enriched data for {file_name}")
         blob_bytes = myblob.read()
         df = pd.read_csv(io.BytesIO(blob_bytes))
         df.columns.str.strip()
-        if 'drive_metadata_uuid' in df.columns:
-            logging.info('drive_metadata_uuid column found')
-            df = df.drop(columns=['drive_metadata_uuid'])
-        
         psql.insert_raw_data(df, "city_search_enriched", "sales_leads")
-        
-        
-        
 
+    new_lead_data = st.get_new_city_search_lead_data(file_id=file_id)
+
+    if not new_lead_data.empty:
+        quick_mail_df = st.create_google_lead_data_frame(new_lead_data)
+        logging.info(f"Writing {file_name} to google sheet")
+        google_sheet_url = gdrive.write_to_google_sheet(
+            dataframe=quick_mail_df,
+            spreadsheet_name=f"Quick Mail Output - {sheet_week}",
+            target_sheet=file_name,
+            folder_id=os.environ.get("QUICK_MAIL_OUTPUT_PARENT_FOLDER_ID"),
+        )
+        logging.info("Wrote data to google sheet")
+        drive_metadata_uuid = new_lead_data["drive_metadata_uuid"].values[0]
+
+        psql.update_city_search_tracking_table(drive_metadata_uuid)
+        logging.info("Updated tracking table")
+
+        psql.update_city_search_tracking_table_shopify_customer(
+            drive_metadata_uuid=drive_metadata_uuid
+        )
+        logging.info("Updated tracking table for shopify customer")
+
+        slack_metrics_city_search = psql.get_slack_channel_metrics_city_search(
+            drive_metadata_uuid=drive_metadata_uuid
+        )
+
+        sheet_name = new_lead_data["file_name"].values[0]
+        spread_sheet_name = gdrive.get_spread_name_by_url(google_sheet_url)
+
+        sheet_and_file_name = f"{spread_sheet_name} - {sheet_name}"
+
+        psql.send_update_slack_metrics(
+            slack_webhook=os.environ.get("SLACK_WEBHOOK"),
+            slack_df=slack_metrics_city_search,
+            sheet_name=sheet_and_file_name,
+            sheet_url=google_sheet_url,
+        )
+
+        
+        psql.update_file_has_been_processed(file_id=file_id)
+        
+        
+        
+        
