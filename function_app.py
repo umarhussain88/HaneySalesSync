@@ -20,7 +20,10 @@ import io
 load_dotenv()
 
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s [%(levelname)s] %(message)s (at line %(lineno)d in %(funcName)s)'
+                    )
+
 logging.info(os.environ["SENTRY_DSN"])
 
 sentry_sdk.init(
@@ -50,6 +53,11 @@ if os.environ.get("FUNCTIONS_ENVIRONMENT") == "preview":
     logging.info("Loading local settings")
     local_settings_path = Path(__file__).parent.joinpath("local.settings.dev.json")
     load_local_settings_as_env_vars(local_settings_path)
+elif os.environ.get("FUNCTIONS_ENVIRONMENT") == "pre_prod":
+    logging.info("Running in pre production mode")
+    logging.info("Loading pre-prod settings")
+    local_settings_path = Path(__file__).parent.joinpath("local.settings.pre_prod.json")
+    load_local_settings_as_env_vars(local_settings_path)
 
 
 gdrive = create_gdrive_service(
@@ -75,22 +83,15 @@ sheet_week = f"Week {pd.Timestamp('today').isocalendar().week}"
 @app.schedule(
     schedule="*/10 * * * 1-5",
     arg_name="GoogleSalesSync",
-    run_on_startup=False,
+    run_on_startup=True,
     use_monitor=False,
 )
 def sales_sync(GoogleSalesSync: func.TimerRequest) -> None:
     if GoogleSalesSync.past_due:
         logging.info("The timer is past due!")
-
-    if os.environ.get("FUNCTIONS_ENVIRONMENT") == "preview":
-        logging.info("Running in preview mode")
-        logging.info("Loading local settings")
-        local_settings_path = Path(__file__).parent.joinpath("local.settings.dev.json")
-        load_local_settings_as_env_vars(local_settings_path)
-
-    # testing all folders from a parent folder.
+        
     all_child_modified_files = gdrive.get_modified_files_in_folder(
-        folder_id=os.environ.get("PARENT_FOLDER"), delta_days=1
+        folder_id=os.environ.get("PARENT_FOLDER"), delta_days=3
     )
 
     if all_child_modified_files:
@@ -102,20 +103,30 @@ def sales_sync(GoogleSalesSync: func.TimerRequest) -> None:
             os.environ.get("QUICK_MAIL_CONFIG_NAME"),
             folder_id=os.environ.get("QUICK_MAIL_CONFIG_FOLDER_ID"),
         )
+        
+        logging.info('Checking if files exist in database')
+        
+        file_dataframe_all = file_dataframe_all.reset_index(drop=True)
+        # file_dataframe_all = file_dataframe_all[file_dataframe_all['name'].str.contains('Larimer County CO -')]
         file_dataframe_new = psql.check_if_record_exists(
             table_name="drive_metadata",
             schema="sales_leads",
             source_dataframe=file_dataframe_all,
             look_up_column="id",
         )
+        
+        logging.info(f"Number of new files: {file_dataframe_new.shape[0]}")
+        logging.info(f"Name of new files: {file_dataframe_new['name'].tolist()}")
 
         if not file_dataframe_new.empty:
             logging.info("New files to process")
+            # TODO: change this into an upsert to avoid duplicates
             psql.insert_raw_data(
-                dataset=file_dataframe_all.drop(columns=["mimeType"]),
+                dataset=file_dataframe_new.drop(columns=["mimeType"]),
                 table_name="drive_metadata",
                 schema="sales_leads",
             )
+        
 
         missing_file_types = psql.get_missing_file_types(gdrive=gdrive)
         if not missing_file_types.empty:
@@ -223,42 +234,42 @@ def CitySearchBlogTrigger(myblob: func.InputStream):
     
     file_id = blob_metadata["metadata"]["file_id"]
 
-    file_name = az.split_and_return_blob_name(myblob.name)
-
     has_file_been_processed = psql.check_if_file_has_been_processed(file_id=file_id)
-
 
     logging.info("Getting franchise data")
     franchise_df = gdrive.get_franchise_data(
         file_id=os.environ.get("FRANCHISE_MASTER_LIST_FILE_ID")
+
     )
     logging.info("Upserting franchise data")
     psql.upsert_franchise_data(
         dataframe=franchise_df, temp_table_name="temp_franchise_data"
     )
-
     if not has_file_been_processed:
         blob_bytes = myblob.read()
         df = pd.read_csv(io.BytesIO(blob_bytes))
         psql.insert_raw_data(df, "city_search", "sales_leads")
 
-        logging.info("Creating city search output")
-        sheet_url_dict = st.post_city_search_data_to_google_sheet(
-            spreadsheet_name=f"City Search Output - {sheet_week}",
-            folder_id=os.environ.get("CITY_SEARCH_OUTPUT_PARENT_FOLDER_ID"),
-            file_name=file_name,
-        )
+    logging.info("Creating city search output")
+    sheet_url_dict = st.post_city_search_data_to_google_sheet(
+        spreadsheet_name=f"City Search Output - {sheet_week}",
+        folder_id=os.environ.get("CITY_SEARCH_OUTPUT_PARENT_FOLDER_ID"),
+        file_id=file_id
+    )
+    for name, sheet_url in sheet_url_dict.items():
+        logging.info(f'{name}: {sheet_url}')
         psql.post_city_search_slack_message(
-            link=sheet_url_dict[file_name], spread_sheet_name=file_name
+        link=sheet_url_dict[name], spread_sheet_name=name
         )
 
-        psql.update_file_has_been_processed(file_id=file_id)
+    psql.update_file_has_been_processed(file_id=file_id)
 
 
 @app.blob_trigger(
     arg_name="myblob",
     path="salesfiles/city_search_enriched/{name}.csv",
     connection="SalesSyncBlogTrigger",
+    enabled=False,
     
 )
 def CitySearchEnrichedBlogTrigger(myblob: func.InputStream):
@@ -267,6 +278,17 @@ def CitySearchEnrichedBlogTrigger(myblob: func.InputStream):
         f"Name: {myblob.name}"
         f"Blob Size: {myblob.length} bytes"
     )
+    
+    target_file_schema = [
+        'first_name',
+        'last_name',
+        'main_point_of_contact_email',
+        'main_contact_linkedin',
+        'generic_contact_email',
+        'company_name',
+        'website',
+        'phone'
+    ]
 
     blob_name_without_container = myblob.name.replace("salesfiles/", "")
     blob_metadata = az.get_blob_metadata(container_name='salesfiles', blob_name=blob_name_without_container)
@@ -281,8 +303,9 @@ def CitySearchEnrichedBlogTrigger(myblob: func.InputStream):
         logging.info(f"Processing city search enriched data for {file_name}")
         blob_bytes = myblob.read()
         df = pd.read_csv(io.BytesIO(blob_bytes))
-        df.columns.str.strip()
-        psql.insert_raw_data(df, "city_search_enriched", "sales_leads")
+        target_df = psql._clean_column_names(df)
+        target_df = target_df[target_file_schema + ["drive_metadata_uuid"]]
+        psql.insert_raw_data(target_df, "city_search_enriched", "sales_leads")
 
     new_lead_data = st.get_new_city_search_lead_data(file_id=file_id)
 

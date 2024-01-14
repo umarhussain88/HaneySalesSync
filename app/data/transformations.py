@@ -1,10 +1,14 @@
 from dataclasses import dataclass
 import pandas as pd
 from typing import TYPE_CHECKING, Optional, Union, Dict
+import logging
 
 if TYPE_CHECKING:
     from ..google_drive.drive import GoogleDrive
 
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s [%(levelname)s] %(message)s (at line %(lineno)d in %(funcName)s)'
+                    )
 
 @dataclass
 class SalesTransformations:
@@ -130,14 +134,15 @@ class SalesTransformations:
         return quick_mail_df
 
     def create_google_sheet_output_for_city_search_data(
-        self, file_name: str
+        self, file_id: str
     ) -> pd.DataFrame:
         query = f"""
         SELECT city.uuid
             , COALESCE(f.franchise_name)  AS franchise_name
             , COALESCE(f.domain_name)     AS domain_name
             ,  city.type
-            , '' AS "Main Point Of Contact"
+            , '' AS "first_name"
+            , '' AS "last_name"
             , '' AS "Main Point of Contact Email"
             , '' AS "Main Contact Linkedin"
             , '' AS "Generic Contact Email"
@@ -158,7 +163,7 @@ class SalesTransformations:
           ON d.uuid = city.drive_metadata_uuid
         LEFT JOIN sales_leads.city_search_franchises f
           ON replace(COALESCE(substring(f.domain_name from 'https?://([^/]*)'), f.domain_name), 'www.', '') = replace(COALESCE(substring(city.website from 'https?://([^/]*)'), city.website), 'www.', '')
-        WHERE d.name = '{file_name}'
+        WHERE d.id = '{file_id}'
         """
         return pd.read_sql(query, self.engine)
 
@@ -168,11 +173,15 @@ class SalesTransformations:
         )
 
     def post_city_search_data_to_google_sheet(
-        self, spreadsheet_name: str, folder_id: str, file_name: str
+        self, spreadsheet_name: str, folder_id: str,
+        file_id : str
+        
     ) -> Dict[str, str]:
         city_search_df = self.create_google_sheet_output_for_city_search_data(
-            file_name=file_name
+            file_id=file_id
         )
+        
+        file_name = pd.read_sql(f"SELECT name FROM sales_leads.drive_metadata WHERE id = '{file_id}'", self.engine)['name'].values[0]
 
         sheet_url_dict = {}
         city_search_df["phone"] = (
@@ -190,20 +199,20 @@ class SalesTransformations:
         city_search_df_non_franchise = city_search_df_non_franchise.drop(
             columns=["franchise_name", "domain_name"]
         )
-
+        logging.info('Writing non franchise data to google sheet')
         url = self.google_api.write_to_google_sheet(
             dataframe=city_search_df_non_franchise,
             spreadsheet_name=spreadsheet_name,
-            target_sheet=f"{file_name: <30}_non_franchise",
+            target_sheet=f"{file_name[:30]}_non_franchise",
             folder_id=folder_id,
         )
 
         sheet_url_dict[file_name] = url
-
+        logging.info('Writing franchise data to google sheet')
         self.google_api.write_to_google_sheet(
             dataframe=city_search_df_franchise,
             spreadsheet_name=spreadsheet_name,
-            target_sheet=f"{file_name: <30}_franchise",
+            target_sheet=f"{file_name[:30]}_franchise",
             folder_id=folder_id,
         )
 

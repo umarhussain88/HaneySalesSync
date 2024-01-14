@@ -97,22 +97,6 @@ class GoogleDrive:
         )
         return files
     
-    def get_modified_files_in_folder(self, folder_id: str, delta_days: int = 7) -> list:
-        delta = (pd.Timestamp.today() - pd.Timedelta(days=delta_days)).strftime(
-        "%Y-%m-%dT00:00:00"
-    )
-
-        files = (
-            self.drive_service.files()
-            .list(
-                q=f"'{folder_id}' in parents and trashed=false and (modifiedTime > '{delta}' or createdTime > '{delta}') and mimeType!='application/vnd.google-apps.folder'",
-                fields="files(id, name, parents, createdTime, modifiedTime,owners,lastModifyingUser, fileExtension)",
-                pageSize=1000,
-            )
-            .execute()
-        )
-        return files
-        
 
     def create_file_list_dataframe(
         self, folder_list: list, parent_folder: Optional[str] = None, 

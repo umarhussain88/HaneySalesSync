@@ -28,6 +28,18 @@ def load_local_settings_as_env_vars(file_path: Path):
 
     for key, value in data["Values"].items():
         os.environ[key] = value
+        
+
+target_file_schema = [
+        'first_name',
+        'last_name',
+        'main_point_of_contact_email',
+        'main_contact_linkedin',
+        'generic_contact_email',
+        'company_name',
+        'website',
+        'phone'
+    ]        
 
 
 if __name__ == "__main__":
@@ -35,6 +47,11 @@ if __name__ == "__main__":
         logging.info("Running in preview mode")
         logging.info("Loading local settings")
         local_settings_path = Path(__file__).parent.joinpath("local.settings.dev.json")
+        load_local_settings_as_env_vars(local_settings_path)
+    elif os.environ.get("FUNCTIONS_ENVIRONMENT") == "pre_prod":
+        logging.info("Running in pre production mode")
+        logging.info("Loading pre-prod settings")
+        local_settings_path = Path(__file__).parent.joinpath("local.settings.pre_prod.json")
         load_local_settings_as_env_vars(local_settings_path)
     elif os.environ.get("FUNCTIONS_ENVIRONMENT") == "prod":
         logging.info("Running in preview mode")
@@ -59,25 +76,50 @@ if __name__ == "__main__":
     az = AzureBlobStorage(connection_string=os.environ.get("SalesSyncBlogTrigger"))
 
     st = SalesTransformations(engine=psql.engine, google_api=gdrive)
-
+    
+    
+    
+    
     myblob = az.get_blob_from_container(
         container_name="salesfiles",
-        blob_name=f"city_search_enriched/122123 - Jackson County MO - CS Search.csv - Scrape-it Cloud Data.csv",
+        blob_name=f"city_search_enriched/121223 - Larimer County CO - CS Search.csv",
     )
 
+    # all_child_modified_files = gdrive.get_modified_files_in_folder(
+    #         folder_id=os.environ.get("PARENT_FOLDER"), delta_days=3
+    #     )
+
+    # if all_child_modified_files:
+    #     file_dataframe_all = gdrive.create_file_list_dataframe(
+    #         all_child_modified_files, record_path=None
+    #     )
+    #     logging.info(f"Number of files edited: {file_dataframe_all.shape[0]}")
+    #     file_config = gdrive.get_file_config(
+    #         os.environ.get("QUICK_MAIL_CONFIG_NAME"),
+    #         folder_id=os.environ.get("QUICK_MAIL_CONFIG_FOLDER_ID"),
+    #     )
+        
+        # logging.info('Checking if files exist in database')
+        
+        # file_dataframe_all = file_dataframe_all.reset_index(drop=True)
+        # file_dataframe_all = file_dataframe_all[file_dataframe_all['name'].str.contains('Larimer County CO -')]
+        
+        
+        
     blob_metadata = az.get_blob_metadata(myblob.container, myblob.name)
     file_id = blob_metadata["metadata"]["file_id"]
 
     file_name = az.split_and_return_blob_name(myblob.name)
 
     has_file_been_processed = psql.check_if_file_has_been_processed(file_id=file_id)
-
+    
     if not has_file_been_processed:
         logging.info(f"Processing city search enriched data for {file_name}")
         blob_bytes = myblob.read()
         df = pd.read_csv(io.BytesIO(blob_bytes))
-        df.columns.str.strip()
-        psql.insert_raw_data(df, "city_search_enriched", "sales_leads")
+        target_df = psql._clean_column_names(df)
+        target_df = target_df[target_file_schema + ["drive_metadata_uuid"]]
+        psql.insert_raw_data(target_df, "city_search_enriched", "sales_leads")
 
     new_lead_data = st.get_new_city_search_lead_data(file_id=file_id)
 
@@ -108,7 +150,7 @@ if __name__ == "__main__":
         sheet_name = new_lead_data["file_name"].values[0]
         spread_sheet_name = gdrive.get_spread_name_by_url(google_sheet_url)
 
-        sheet_and_file_name = f"{file_name} - {sheet_name}"
+        sheet_and_file_name = f"{spread_sheet_name} - {sheet_name}"
 
         psql.send_update_slack_metrics(
             slack_webhook=os.environ.get("SLACK_WEBHOOK"),
@@ -116,3 +158,6 @@ if __name__ == "__main__":
             sheet_name=sheet_and_file_name,
             sheet_url=google_sheet_url,
         )
+
+        
+        psql.update_file_has_been_processed(file_id=file_id)
