@@ -146,7 +146,7 @@ class SalesTransformations:
             , '' AS "Main Point of Contact Email"
             , '' AS "Main Contact Linkedin"
             , '' AS "Generic Contact Email"
-            , '' AS company_name
+            , city.title AS company_name
             , city.website
             , city.phone
             , city.position

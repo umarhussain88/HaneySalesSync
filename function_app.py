@@ -83,7 +83,7 @@ sheet_week = f"Week {pd.Timestamp('today').isocalendar().week}"
 @app.schedule(
     schedule="*/10 * * * 1-5",
     arg_name="GoogleSalesSync",
-    run_on_startup=True,
+    run_on_startup=False,
     use_monitor=False,
 )
 def sales_sync(GoogleSalesSync: func.TimerRequest) -> None:
@@ -91,7 +91,7 @@ def sales_sync(GoogleSalesSync: func.TimerRequest) -> None:
         logging.info("The timer is past due!")
         
     all_child_modified_files = gdrive.get_modified_files_in_folder(
-        folder_id=os.environ.get("PARENT_FOLDER"), delta_days=3
+        folder_id=os.environ.get("PARENT_FOLDER"), delta_days=1
     )
 
     if all_child_modified_files:

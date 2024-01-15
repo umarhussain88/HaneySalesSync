@@ -82,7 +82,7 @@ if __name__ == "__main__":
     
     myblob = az.get_blob_from_container(
         container_name="salesfiles",
-        blob_name=f"city_search_enriched/121223 - Larimer County CO - CS Search.csv",
+        blob_name=f"city_search/GA - Henry County - Cleaning Service - 1-3-24.csv",
     )
 
     # all_child_modified_files = gdrive.get_modified_files_in_folder(
@@ -113,51 +113,29 @@ if __name__ == "__main__":
 
     has_file_been_processed = psql.check_if_file_has_been_processed(file_id=file_id)
     
+
+    logging.info("Getting franchise data")
+    franchise_df = gdrive.get_franchise_data(
+        file_id=os.environ.get("FRANCHISE_MASTER_LIST_FILE_ID")
+
+    )
+    logging.info("Upserting franchise data")
+    psql.upsert_franchise_data(
+        dataframe=franchise_df, temp_table_name="temp_franchise_data"
+    )
     if not has_file_been_processed:
-        logging.info(f"Processing city search enriched data for {file_name}")
         blob_bytes = myblob.read()
         df = pd.read_csv(io.BytesIO(blob_bytes))
-        target_df = psql._clean_column_names(df)
-        target_df = target_df[target_file_schema + ["drive_metadata_uuid"]]
-        psql.insert_raw_data(target_df, "city_search_enriched", "sales_leads")
+        psql.insert_raw_data(df, "city_search", "sales_leads")
 
-    new_lead_data = st.get_new_city_search_lead_data(file_id=file_id)
-
-    if not new_lead_data.empty:
-        quick_mail_df = st.create_google_lead_data_frame(new_lead_data)
-        logging.info(f"Writing {file_name} to google sheet")
-        google_sheet_url = gdrive.write_to_google_sheet(
-            dataframe=quick_mail_df,
-            spreadsheet_name=f"Quick Mail Output - {sheet_week}",
-            target_sheet=file_name,
-            folder_id=os.environ.get("QUICK_MAIL_OUTPUT_PARENT_FOLDER_ID"),
+    logging.info("Creating city search output")
+    sheet_url_dict = st.post_city_search_data_to_google_sheet(
+        spreadsheet_name=f"City Search Output - {sheet_week}",
+        folder_id=os.environ.get("CITY_SEARCH_OUTPUT_PARENT_FOLDER_ID"),
+        file_id=file_id
+    )
+    for name, sheet_url in sheet_url_dict.items():
+        logging.info(f'{name}: {sheet_url}')
+        psql.post_city_search_slack_message(
+        link=sheet_url_dict[name], spread_sheet_name=name
         )
-        logging.info("Wrote data to google sheet")
-        drive_metadata_uuid = new_lead_data["drive_metadata_uuid"].values[0]
-
-        psql.update_city_search_tracking_table(drive_metadata_uuid)
-        logging.info("Updated tracking table")
-
-        psql.update_city_search_tracking_table_shopify_customer(
-            drive_metadata_uuid=drive_metadata_uuid
-        )
-        logging.info("Updated tracking table for shopify customer")
-
-        slack_metrics_city_search = psql.get_slack_channel_metrics_city_search(
-            drive_metadata_uuid=drive_metadata_uuid
-        )
-
-        sheet_name = new_lead_data["file_name"].values[0]
-        spread_sheet_name = gdrive.get_spread_name_by_url(google_sheet_url)
-
-        sheet_and_file_name = f"{spread_sheet_name} - {sheet_name}"
-
-        psql.send_update_slack_metrics(
-            slack_webhook=os.environ.get("SLACK_WEBHOOK"),
-            slack_df=slack_metrics_city_search,
-            sheet_name=sheet_and_file_name,
-            sheet_url=google_sheet_url,
-        )
-
-        
-        psql.update_file_has_been_processed(file_id=file_id)
