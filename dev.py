@@ -82,7 +82,7 @@ if __name__ == "__main__":
     
     myblob = az.get_blob_from_container(
         container_name="salesfiles",
-        blob_name=f"city_search/GA - Henry County - Cleaning Service - 1-3-24.csv",
+        blob_name="city_search/MI - Oakland County - Cleaning Service - 1-17-24.csv",
     )
 
     # all_child_modified_files = gdrive.get_modified_files_in_folder(
@@ -105,14 +105,12 @@ if __name__ == "__main__":
         # file_dataframe_all = file_dataframe_all[file_dataframe_all['name'].str.contains('Larimer County CO -')]
         
         
-        
-    blob_metadata = az.get_blob_metadata(myblob.container, myblob.name)
+    blob_name_without_container = myblob.name.replace("salesfiles/", "")
+    blob_metadata = az.get_blob_metadata(container_name='salesfiles', blob_name=blob_name_without_container)
+   
     file_id = blob_metadata["metadata"]["file_id"]
 
-    file_name = az.split_and_return_blob_name(myblob.name)
-
     has_file_been_processed = psql.check_if_file_has_been_processed(file_id=file_id)
-    
 
     logging.info("Getting franchise data")
     franchise_df = gdrive.get_franchise_data(
@@ -125,8 +123,11 @@ if __name__ == "__main__":
     )
     if not has_file_been_processed:
         blob_bytes = myblob.read()
+        
+        columns = psql.get_columns_from_table("city_search", "sales_leads")
+        
         df = pd.read_csv(io.BytesIO(blob_bytes))
-        psql.insert_raw_data(df, "city_search", "sales_leads")
+        psql.insert_raw_data(dataset=df, table_name="city_search", schema="sales_leads", column_names=columns)
 
     logging.info("Creating city search output")
     sheet_url_dict = st.post_city_search_data_to_google_sheet(
@@ -139,3 +140,5 @@ if __name__ == "__main__":
         psql.post_city_search_slack_message(
         link=sheet_url_dict[name], spread_sheet_name=name
         )
+
+    psql.update_file_has_been_processed(file_id=file_id)

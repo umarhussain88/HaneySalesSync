@@ -187,6 +187,9 @@ def ZiSearchBlobTrigger(myblob: func.InputStream):
         logging.info(f"Processing file: {file_name}")
         df = pd.read_csv(io.StringIO(blob_str))
         psql.insert_raw_data(dataset=df, table_name="leads", schema="sales_leads")
+        psql.update_file_has_been_processed(file_id=file_id)
+        
+        
         new_lead_data_zi = st.get_new_zi_search_lead_data(file_name=file_name)
 
         if not new_lead_data_zi.empty:
@@ -214,7 +217,6 @@ def ZiSearchBlobTrigger(myblob: func.InputStream):
                 slack_webhook=os.environ.get("SLACK_WEBHOOK"), slack_df=slack_df
             )
 
-            psql.update_file_has_been_processed(file_id=file_id)
 
 
 @app.blob_trigger(
@@ -247,8 +249,11 @@ def CitySearchBlogTrigger(myblob: func.InputStream):
     )
     if not has_file_been_processed:
         blob_bytes = myblob.read()
+        
+        columns = psql.get_columns_from_table("city_search", "sales_leads")
+        
         df = pd.read_csv(io.BytesIO(blob_bytes))
-        psql.insert_raw_data(df, "city_search", "sales_leads")
+        psql.insert_raw_data(dataset=df, table_name="city_search", schema="sales_leads", column_names=columns)
 
     logging.info("Creating city search output")
     sheet_url_dict = st.post_city_search_data_to_google_sheet(

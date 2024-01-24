@@ -119,6 +119,7 @@ class SalesTransformations:
     def create_google_lead_data_frame(self, dataframe: pd.DataFrame) -> pd.DataFrame:
         target_columns = list(self.target_schema.values())
         
+        dataframe =  dataframe.rename(columns={'main_contact_linkedin' : 'linkedin_contact_profile_url'})
         quick_mail_df = self.check_if_columns_exist_if_not_create(dataframe, target_columns)
 
         quick_mail_df = dataframe[target_columns].copy()

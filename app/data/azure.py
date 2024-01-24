@@ -145,6 +145,7 @@ class PostgresExporter:
         table_name: str,
         schema: str,
         created_at_column: Optional[str] = "created_at",
+        column_names: Optional[list] = None, 
     ) -> None:
         if dataset.empty:
             pass
@@ -163,6 +164,9 @@ class PostgresExporter:
 
             col_types[created_at_column] = types.DateTime()
             dataset = dataset.replace("nan", None)
+            
+            if column_names:
+                dataset = dataset[column_names]
 
             dataset.to_sql(
                 name=table_name,
@@ -213,7 +217,7 @@ class PostgresExporter:
             """
             return pd.read_sql(query, connection)
 
-    def update_tracking_table(self, drive_metadata_uuid: str) -> None:
+    def  update_tracking_table(self, drive_metadata_uuid: str) -> None:
         """
         Get the assoicated UUID and write an update statement
         to the tracking table.
@@ -225,14 +229,17 @@ class PostgresExporter:
             , l.uuid as lead_uuid
             , 'posted' as status
             FROM sales_leads.leads l
+            LEFT JOIN sales_leads.tracking t 
+              ON t.lead_uuid = l.uuid
+              AND t.city_search_lead_uuid is null
             WHERE l.drive_metadata_uuid = '{drive_metadata_uuid}'
-            and l.email_address is not null
+            AND l.email_address IS NOT NULL
+            AND t.lead_uuid IS NULL
         )
         INSERT INTO sales_leads.tracking
         (lead_uuid, status, email_address, created_at)
         SELECT lead_uuid, status::status_enum, email_address, CURRENT_TIMESTAMP
         FROM new_data
-        WHERE lead_uuid NOT IN (SELECT lead_uuid FROM sales_leads.tracking);
         """
 
         with self.engine.begin() as connection:
@@ -564,6 +571,8 @@ class PostgresExporter:
             connection.execute(text(temp_table_query))
 
         dataframe.columns = ["franchise_name", "domain_name"]
+        
+        dataframe = dataframe.drop_duplicates(subset=['domain_name'],keep='first')
 
         dataframe.to_sql(
             name=temp_table_name, con=self.engine, if_exists="append", index=False
@@ -685,6 +694,17 @@ class PostgresExporter:
         query = f"UPDATE sales_leads.drive_metadata SET name = REPLACE(name, 'xlsx', 'csv') WHERE name = '{file_name}'"
         with self.engine.connect() as conn:
             conn.execute(text(query))
+            
+    def get_columns_from_table(self, table_name: str, schema: str) -> list:
+        with self.engine.connect() as connection:
+            query = f"""
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name = '{table_name}'
+            AND table_schema = '{schema}'
+            AND column_name not in ('uuid','updated_at')
+            """
+            return [c[0] for c in connection.execute(text(query)).fetchall()]
 
 
 @dataclass
