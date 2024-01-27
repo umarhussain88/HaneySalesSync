@@ -316,13 +316,27 @@ def CitySearchEnrichedBlogTrigger(myblob: func.InputStream):
 
     if not new_lead_data.empty:
         quick_mail_df = st.create_google_lead_data_frame(new_lead_data)
+        
+        quick_mail_df_generic = quick_mail_df[quick_mail_df['First Name'].isna() & quick_mail_df['Last Name'].isna()]
+        quick_mail_df_non_generic = quick_mail_df[~quick_mail_df['First Name'].isna() & ~quick_mail_df['Last Name'].isna()]
+        
         logging.info(f"Writing {file_name} to google sheet")
         google_sheet_url = gdrive.write_to_google_sheet(
-            dataframe=quick_mail_df,
+            dataframe=quick_mail_df_non_generic,
             spreadsheet_name=f"Quick Mail Output - {sheet_week}",
             target_sheet=file_name,
             folder_id=os.environ.get("QUICK_MAIL_OUTPUT_PARENT_FOLDER_ID"),
         )
+        
+        if not quick_mail_df_generic.empty:
+            logging.info('Writing generic data to google sheet')
+            google_sheet_url = gdrive.write_to_google_sheet(
+                dataframe=quick_mail_df_generic,
+                spreadsheet_name=f"Quick Mail Output - {sheet_week}",
+                target_sheet=f"Generic of {file_name}",
+                folder_id=os.environ.get("QUICK_MAIL_OUTPUT_PARENT_FOLDER_ID"),
+            )
+        
         logging.info("Wrote data to google sheet")
         drive_metadata_uuid = new_lead_data["drive_metadata_uuid"].values[0]
 

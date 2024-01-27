@@ -166,7 +166,9 @@ class PostgresExporter:
             dataset = dataset.replace("nan", None)
             
             if column_names:
-                dataset = dataset[column_names]
+                
+                existing_columns = list(set(column_names) & set(dataset.columns))
+                dataset = dataset[existing_columns]
 
             dataset.to_sql(
                 name=table_name,

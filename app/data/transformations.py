@@ -138,6 +138,10 @@ class SalesTransformations:
         self, file_id: str
     ) -> pd.DataFrame:
         query = f"""
+        WITH all_file_uuids AS (
+                         SELECT uuid
+                         FROM sales_leads.drive_metadata
+                         WHERE id = '{file_id}')
         SELECT city.uuid
             , COALESCE(f.franchise_name)  AS franchise_name
             , COALESCE(f.domain_name)     AS domain_name
@@ -165,6 +169,13 @@ class SalesTransformations:
         LEFT JOIN sales_leads.city_search_franchises f
           ON replace(COALESCE(substring(f.domain_name from 'https?://([^/]*)'), f.domain_name), 'www.', '') = replace(COALESCE(substring(city.website from 'https?://([^/]*)'), city.website), 'www.', '')
         WHERE d.id = '{file_id}'
+        AND city.dataid NOT IN (
+                         SELECT dataid
+                         FROM sales_leads.city_search
+                         WHERE
+                             drive_metadata_uuid NOT IN (
+                                                          SELECT uuid
+                                                          FROM all_file_uuids))
         """
         return pd.read_sql(query, self.engine)
 

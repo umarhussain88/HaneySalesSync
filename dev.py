@@ -82,9 +82,8 @@ if __name__ == "__main__":
     
     myblob = az.get_blob_from_container(
         container_name="salesfiles",
-        blob_name="city_search/MI - Oakland County - Cleaning Service - 1-17-24.csv",
+        blob_name="city_search/WI - Brown County - Cleaning Service - 1-23-24.csv",
     )
-
     # all_child_modified_files = gdrive.get_modified_files_in_folder(
     #         folder_id=os.environ.get("PARENT_FOLDER"), delta_days=3
     #     )
@@ -104,10 +103,9 @@ if __name__ == "__main__":
         # file_dataframe_all = file_dataframe_all.reset_index(drop=True)
         # file_dataframe_all = file_dataframe_all[file_dataframe_all['name'].str.contains('Larimer County CO -')]
         
-        
     blob_name_without_container = myblob.name.replace("salesfiles/", "")
     blob_metadata = az.get_blob_metadata(container_name='salesfiles', blob_name=blob_name_without_container)
-   
+    
     file_id = blob_metadata["metadata"]["file_id"]
 
     has_file_been_processed = psql.check_if_file_has_been_processed(file_id=file_id)
