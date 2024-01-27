@@ -96,12 +96,15 @@ class GoogleDrive:
             .execute()
         )
         return files
+    
 
     def create_file_list_dataframe(
-        self, folder_list: list, parent_folder: Optional[str] = None
+        self, folder_list: list, parent_folder: Optional[str] = None, 
+        record_path: Optional[str] = "files"
+        
     ) -> pd.DataFrame:
         file_list_df = pd.concat(
-            [pd.json_normalize(folder["files"], max_level=1) for folder in folder_list]
+            [pd.json_normalize(folder, max_level=1, record_path=record_path) for folder in folder_list]
         )
         
         if parent_folder and not file_list_df.empty:
@@ -118,10 +121,9 @@ class GoogleDrive:
             _, done = downloader.next_chunk()
         return downloaded
 
-    def get_stream_object(self, file_id: str) -> pd.DataFrame:
+    def get_stream_object(self, file_id: str) -> BytesIO:
         downloaded = self.download_file(file_id)
-        downloaded.seek(0)
-        return pd.read_csv(downloaded)
+        return downloaded
 
     def get_spreadsheet(
         self,
@@ -172,7 +174,7 @@ class GoogleDrive:
         target_sheet: str,
         folder_id: str,
         replacement_strategy: Optional[str] = "replace",
-    ) -> None:
+    ) -> gspread.Worksheet.url:
         worksheet = self.get_spreadsheet(
             spreadsheet_name=spreadsheet_name, worksheet_name=target_sheet, folder_id=folder_id
         )
@@ -191,6 +193,8 @@ class GoogleDrive:
             row=rc,
             include_column_header=include_headers,
         )
+        
+        return worksheet.url
 
     def get_file_config(
         self, config_name_spreadsheet_name: str, folder_id: str
@@ -225,10 +229,116 @@ class GoogleDrive:
 
         self.drive_service.files().create(body=file_metadata).execute()
 
-    def write_file_to_google_sheet(self, file_name: str) -> None:
-        """Write the file to the google sheet.
+    def get_parent_folder_name(self, parent_id: str) -> str:
+        parent_folder = (
+            self.drive_service.files()
+            .get(fileId=parent_id, fields="name")
+            .execute()["name"]
+        )
+        return parent_folder
+    
+    
+    def get_parent_folder(self, file_id: str) -> list:
+        file = self.drive_service.files().get(fileId=file_id, fields="parents").execute()
+        parents = file.get("parents", [])
+        return parents
+    
+    def get_all_parent_folders(self, folder_id: str, parent_folders=None) -> list:
+        if parent_folders is None:
+            parent_folders = []
 
-        Args:
-            file_name (str): file_name from drive_metadata table
-        """
-        pass
+        parents = self.get_parent_folder(folder_id)
+        if not parents:
+            return parent_folders
+
+        for parent_id in parents:
+            parent_folder_name = self.get_parent_folder_name(parent_id)
+            parent_folders.append(parent_folder_name)
+            self.get_all_parent_folders(parent_id, parent_folders)
+
+        return parent_folders
+    
+    def get_file_type(self, file_id: str) -> str:
+        file = self.drive_service.files().get(fileId=file_id, fields="fileExtension").execute()
+        return file.get("fileExtension", [])
+        
+    #TODO add the following into the above class to recursively trawl child folders for modified files.
+    
+    def get_all_files_in_folder(self, folder_id: str) -> list:
+        query = f"'{folder_id}' in parents and trashed=false and name!='Processed'"
+        results = self.drive_service.files().list(q=query, 
+                                                fields="files(id, name, parents, createdTime, modifiedTime,owners,lastModifyingUser, fileExtension, mimeType)"
+                                                ).execute()
+        items = results.get('files', [])
+        return items
+
+    def get_modified_files_in_folder(self, folder_id: str, delta_days: int = 7) -> list:
+        delta = (pd.Timestamp.today() - pd.Timedelta(days=delta_days)).strftime(
+            "%Y-%m-%dT00:00:00"
+        )
+
+        all_files = []
+        folders_to_check = [folder_id]
+
+        while folders_to_check:
+            current_folder_id = folders_to_check.pop(0)
+            files = self.get_all_files_in_folder(current_folder_id)
+
+            for file in files:
+                if file['mimeType'] == 'application/vnd.google-apps.folder':
+                    folders_to_check.append(file['id'])
+                elif file['mimeType'] != 'application/vnd.google-apps.folder' and (file['modifiedTime'] > delta or file['createdTime'] > delta):
+                    all_files.append(file)
+
+        return all_files
+    
+    def folder_exists(self, folder_name: str, parent_id ) -> bool:
+        
+        query = f"name='{folder_name}' and '{parent_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
+        results = self.drive_service.files().list(q=query, fields='files(id, name)').execute()
+        items = results.get('files', [])
+        return len(items) > 0
+        
+    def create_processed_folder_if_not_exists(self, file_id : str) -> None:
+        parent_folder = self.get_parent_folder(file_id)
+        if not self.folder_exists("Processed", parent_folder[0]):
+            file_metadata = {
+                "name": "Processed",
+                "mimeType": "application/vnd.google-apps.folder",
+                "parents": parent_folder,
+            }
+            self.drive_service.files().create(body=file_metadata).execute()
+            
+    def get_processed_folder_id(self, file_id: str) -> str:
+        
+        parent_id = self.get_parent_folder(file_id)
+        query = f"name='Processed' and '{parent_id[0]}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
+        results = self.drive_service.files().list(q=query, fields='files(id, name)').execute()
+        items = results.get('files', [])
+        return items[0]['id']
+    
+        
+    def move_file_to_processed_folder(self, file_id: str) -> None:
+        
+        self.create_processed_folder_if_not_exists(file_id)
+        
+        file = self.drive_service.files().get(fileId=file_id, fields='parents').execute()
+        previous_parents = ",".join(file.get('parents'))
+        file['parents'] = [self.get_processed_folder_id(file_id)]
+        file = self.drive_service.files().update(fileId=file_id,
+                                            addParents=file['parents'][0],
+                                            removeParents=previous_parents,
+                                            fields='id, parents').execute()
+        
+        
+    def get_franchise_data(self, file_id: str) -> pd.DataFrame:
+        file = self.drive_service.files().get(fileId=file_id, fields='name').execute()
+        file_name = file.get('name')
+        
+        if file_name.strip() == 'FRANCHISE Master List':
+            return pd.DataFrame(self.client.open_by_key(file_id).sheet1.get_all_records())
+        else:
+            logging.info(f"File {file_name} is not Franchise Data")
+    
+    def get_spread_name_by_url(self, url: str) -> str:
+        return self.client.open_by_url(url).title

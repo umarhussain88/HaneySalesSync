@@ -1,5 +1,5 @@
 from logging.config import fileConfig
-
+import logging
 from sqlalchemy import engine_from_config
 from sqlalchemy import pool
 from dotenv import load_dotenv
@@ -13,7 +13,16 @@ config = context.config
 load_dotenv()
 
 
-if os.environ.get('FUNCTIONS_ENVIRONMENT') == 'preview':
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s [%(levelname)s] %(message)s (at line %(lineno)d in %(funcName)s) %(filename)s',
+                    )
+                    
+
+if os.environ.get('FUNCTIONS_ENVIRONMENT') == 'prod':
+    logging.info('Running in prod mode')
+    config.set_main_option("sqlalchemy.url", os.environ.get("ALEMBIC_SQL_ALCHEMY_URL_PROD"))
+else:
+    logging.info('Running in preview or pre-production mode')
     config.set_main_option("sqlalchemy.url", os.environ.get("ALEMBIC_SQL_ALCHEMY_URL"))
 
 

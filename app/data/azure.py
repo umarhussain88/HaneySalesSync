@@ -8,7 +8,8 @@ from sqlalchemy.engine import URL
 from notifiers import get_notifier
 import textwrap
 import logging
-from typing import List
+from app.google_drive.drive import GoogleDrive
+from azure.storage.blob import BlobServiceClient, BlobType
 
 
 @dataclass
@@ -144,8 +145,8 @@ class PostgresExporter:
         table_name: str,
         schema: str,
         created_at_column: Optional[str] = "created_at",
+        column_names: Optional[list] = None, 
     ) -> None:
-        
         if dataset.empty:
             pass
 
@@ -163,6 +164,11 @@ class PostgresExporter:
 
             col_types[created_at_column] = types.DateTime()
             dataset = dataset.replace("nan", None)
+            
+            if column_names:
+                
+                existing_columns = list(set(column_names) & set(dataset.columns))
+                dataset = dataset[existing_columns]
 
             dataset.to_sql(
                 name=table_name,
@@ -188,13 +194,14 @@ class PostgresExporter:
         """
 
         if source_dataframe.empty:
-            logging.info('No new files to process')
+            logging.info("No new files to process")
         else:
             look_up_vals = source_dataframe[look_up_column].unique().tolist()
 
             query = f"""
             
-            SELECT id FROM {schema}.{table_name} WHERE {look_up_column} IN  ({', '.join(f"'{item}'" for item in look_up_vals)})
+            SELECT id FROM {schema}.{table_name} 
+            WHERE {look_up_column} IN  ({', '.join(f"'{item}'" for item in look_up_vals)})
             """
 
             current_files = pd.read_sql(query, self.engine)
@@ -212,7 +219,7 @@ class PostgresExporter:
             """
             return pd.read_sql(query, connection)
 
-    def update_tracking_table(self, drive_metadata_uuid: str) -> None:
+    def  update_tracking_table(self, drive_metadata_uuid: str) -> None:
         """
         Get the assoicated UUID and write an update statement
         to the tracking table.
@@ -224,22 +231,55 @@ class PostgresExporter:
             , l.uuid as lead_uuid
             , 'posted' as status
             FROM sales_leads.leads l
+            LEFT JOIN sales_leads.tracking t 
+              ON t.lead_uuid = l.uuid
+              AND t.city_search_lead_uuid is null
             WHERE l.drive_metadata_uuid = '{drive_metadata_uuid}'
-            and l.email_address is not null
+            AND l.email_address IS NOT NULL
+            AND t.lead_uuid IS NULL
         )
         INSERT INTO sales_leads.tracking
         (lead_uuid, status, email_address, created_at)
         SELECT lead_uuid, status::status_enum, email_address, CURRENT_TIMESTAMP
         FROM new_data
-        WHERE lead_uuid NOT IN (SELECT lead_uuid FROM sales_leads.tracking);
+        """
+
+        with self.engine.begin() as connection:
+            connection.execute(text(qry))
+
+    def update_city_search_tracking_table(self, drive_metadata_uuid: str) -> None:
+        """
+        Get the assoicated UUID and write an update statement
+        to the tracking table.
+        """
+
+        qry = f"""
+        WITH new_data AS (
+            SELECT COALESCE(l.main_point_of_contact_email, l.generic_contact_email) AS email_address
+            , l.uuid as city_search_lead_uuid
+            , 'posted' as status
+            FROM sales_leads.city_search_enriched l
+            WHERE l.drive_metadata_uuid = '{drive_metadata_uuid}'
+            AND COALESCE(l.main_point_of_contact_email, l.generic_contact_email) IS NOT NULL
+        )
+        
+        , not_already_seen AS (
+                select n.*
+                from new_data n
+                LEFT JOIN sales_leads.tracking t
+                ON t.city_search_lead_uuid = n.city_search_lead_uuid
+                WHERE n.city_search_lead_uuid IS NOT NULL
+            )
+        INSERT INTO sales_leads.tracking
+        (city_search_lead_uuid, status, email_address, created_at)
+        SELECT city_search_lead_uuid, status::status_enum, email_address, CURRENT_TIMESTAMP
+        FROM not_already_seen
         """
 
         with self.engine.begin() as connection:
             connection.execute(text(qry))
 
     def update_tracking_table_shopify_customer(self, drive_metadata_uuid: str) -> None:
-        
-        
         with self.engine.begin() as connection:
             qry = f"""WITH new_data AS (
                 SELECT  tracking.uuid 
@@ -271,7 +311,43 @@ class PostgresExporter:
 
             connection.execute(text(qry))
 
-    def get_slack_channel_metrics(self, drive_metadata_uuid : str) -> pd.DataFrame:
+    def update_city_search_tracking_table_shopify_customer(
+        self, drive_metadata_uuid: str
+    ) -> None:
+        with self.engine.begin() as connection:
+            qry = f"""WITH new_data AS (
+                SELECT  tracking.uuid 
+                , COALESCE(l.main_point_of_contact_email, l.generic_contact_email) AS email_address
+                , l.uuid as city_search_lead_uuid
+                , 'shopify_customer' as status
+                FROM sales_leads.city_search_enriched l
+                INNER JOIN dm_shopify.sales_customer_view scv
+                ON COALESCE(l.main_point_of_contact_email, l.generic_contact_email) = scv.email
+                LEFT JOIN sales_leads.tracking
+                  ON l.uuid = tracking.city_search_lead_uuid
+                WHERE drive_metadata_uuid = '{drive_metadata_uuid}'
+                AND (tracking.city_search_lead_uuid IS NULL
+                    OR tracking.status = 'posted') 
+                    -- we check for shopify customers AFTER they have been posted
+                    -- so we want to update these records
+                )
+    
+                INSERT INTO sales_leads.tracking
+                (uuid, city_search_lead_uuid, status, email_address, created_at)
+                SELECT COALESCE(uuid,gen_random_uuid()), city_search_lead_uuid, status::status_enum, email_address, CURRENT_TIMESTAMP
+                FROM new_data
+                ON CONFLICT (uuid)
+                DO UPDATE
+                SET status = EXCLUDED.status
+                  , created_at = CURRENT_TIMESTAMP
+                ;
+            """
+
+            connection.execute(text(qry))
+
+    def get_slack_channel_metrics_zi_search(
+        self, drive_metadata_uuid: str
+    ) -> pd.DataFrame:
         return pd.read_sql(
             f""" 
                      SELECT d.name
@@ -290,13 +366,35 @@ class PostgresExporter:
             self.engine,
         )
 
+    def get_slack_channel_metrics_city_search(
+        self, drive_metadata_uuid: str
+    ) -> pd.DataFrame:
+        return pd.read_sql(
+            f""" 
+                     SELECT d.name
+                          , SUM(CASE WHEN tracking.status = 'shopify_customer' THEN 1 ELSE 0 END) AS number_of_shopify_customers
+                          , SUM(CASE WHEN tracking.status = 'posted' THEN 1 ELSE 0 END)           AS number_of_posted_leads
+                          , d.created_at
+                     FROM sales_leads.tracking
+                       LEFT JOIN sales_leads.city_search_enriched          l
+                         ON l.uuid = tracking.city_search_lead_uuid
+                       LEFT JOIN sales_leads.drive_metadata d
+                         ON d.uuid = l.drive_metadata_uuid
+                     WHERE l.drive_metadata_uuid IN ('{drive_metadata_uuid}')
+                     GROUP BY d.name, d.created_at
+                           """,
+            self.engine,
+        )
+
     def create_config_temp_table(self, temp_table_name: str) -> None:
         qry = f"""
         CREATE TEMPORARY TABLE {temp_table_name} (
             
             filename varchar(255),
             hubspot_owner varchar(255),
-            zi_search varchar(255) )           
+            zi_search varchar(255), 
+            file_type varchar(255)
+            )           
         """
 
         with self.engine.begin() as connection:
@@ -307,6 +405,8 @@ class PostgresExporter:
             pass
         else:
             self.create_config_temp_table(temp_table_name="temp_config")
+
+            logging.info(dataframe.columns)
 
             dataframe.columns = ["filename", "hubspot_owner", "zi_search"]
 
@@ -343,11 +443,12 @@ class PostgresExporter:
     def get_and_post_missing_config(self, slack_webhook) -> None:
         missing_config = pd.read_sql(
             """ 
-            SELECT name, created_at, lastmodifyinguser_displayname
+            SELECT name, created_at, lastmodifyinguser_displayname, file_type
             FROM sales_leads.drive_metadata
             WHERE
             config_file_uuid IS NULL
-            AND has_posted_on_slack = False
+            AND has_posted_on_slack IS NULL
+            AND file_type NOT IN ('city_search')
             """,
             self.engine,
         )
@@ -360,6 +461,7 @@ class PostgresExporter:
                 Missing Config File: {row['name']}
                 Created At: {row['created_at']}
                 Last Modified By: {row['lastmodifyinguser_displayname']}
+                file_type: {row['file_type']}
                 Please update this file so an output file can be created.
                 https://docs.google.com/spreadsheets/d/1_wPctIjTdSXDvJIRmXw9S5MqYe3zE8dfCYGLYWg4BPg/edit#gid=0
                 """
@@ -370,8 +472,14 @@ class PostgresExporter:
                     webhook_url=slack_webhook,
                 )
 
+                self.update_drive_table_slack_posted()
+
     def send_update_slack_metrics(
-        self, slack_webhook: str, slack_df: pd.DataFrame
+        self,
+        slack_webhook: str,
+        slack_df: pd.DataFrame,
+        sheet_name: Optional[str] = "",
+        sheet_url: Optional[str] = "",
     ) -> None:
         for group, data in slack_df.groupby("name"):
             message = textwrap.dedent(
@@ -382,20 +490,278 @@ class PostgresExporter:
             """
             )
 
+            if sheet_name != "":
+                message = message + f"\nSpreadsheet: <{sheet_url}|{sheet_name}>"
+
             notifier = get_notifier("slack")
             logging.info(message)
             notifier.notify(
                 message=message, webhook_url=os.environ.get("SLACK_WEBHOOK")
             )
-            
+
     def update_drive_table_slack_posted(self) -> None:
-        
         qry = f"""
         UPDATE sales_leads.drive_metadata
         SET has_posted_on_slack = True
         WHERE config_file_uuid IS NULL
-        AND has_posted_on_slack = False
+        AND has_posted_on_slack IS NULL
         """
-        
+
         with self.engine.begin() as connection:
             connection.execute(text(qry))
+
+    def get_files_to_process(self, ids: list) -> pd.DataFrame:
+        with self.engine.connect() as connection:
+            query = f"""
+            SELECT id, name, file_type
+            FROM sales_leads.drive_metadata
+            WHERE id IN ({', '.join(f"'{item}'" for item in ids)})
+            AND (config_file_uuid IS NOT NULL
+            OR file_type = 'city_search') -- this doesn't need a config type.
+            """
+            return pd.read_sql(query, connection)
+
+    def process_file(self, file_id: str, gdrive: GoogleDrive) -> pd.DataFrame:
+        uuid = self.get_uuid_from_table(
+            table_name="drive_metadata",
+            schema="sales_leads",
+            look_up_val=file_id,
+            look_up_column="id",
+        )
+
+        stream = gdrive.get_stream_object(file_id)
+
+        file_ext = gdrive.get_file_type(file_id)
+
+        if file_ext == "csv":
+            stream.seek(0)
+            df = pd.read_csv(stream)
+        elif file_ext == "xlsx":
+            df = pd.read_excel(stream)
+
+        if "drive_metadata_uuid" in df.columns:
+            logging.info(
+                "drive_metadata_uuid column found for some reason, sometimes the sales teams adds this from other lead generated files.."
+            )
+            df = df.drop(columns=["drive_metadata_uuid"])
+
+        df["drive_metadata_uuid"] = uuid["uuid"].values[0]
+
+        return df
+
+    def filter_file_dataframe_with_file_type(
+        self, file_dataframe: pd.DataFrame
+    ) -> pd.DataFrame:
+        file_dataframe_with_file_type = file_dataframe[
+            file_dataframe["file_type"].isnull() == False
+        ]
+
+        return file_dataframe_with_file_type
+
+    def upsert_franchise_data(
+        self,
+        dataframe: pd.DataFrame,
+        temp_table_name: Optional[str] = "city_franchises",
+    ) -> None:
+        temp_table_query = f"""DROP TABLE IF EXISTS {temp_table_name};
+             CREATE TEMPORARY TABLE {temp_table_name} (
+              franchise_name varchar(255)
+            ,  domain_name varchar(255)
+            )"""
+
+        with self.engine.begin() as connection:
+            connection.execute(text(temp_table_query))
+
+        dataframe.columns = ["franchise_name", "domain_name"]
+        
+        dataframe = dataframe.drop_duplicates(subset=['domain_name'],keep='first')
+
+        dataframe.to_sql(
+            name=temp_table_name, con=self.engine, if_exists="append", index=False
+        )
+
+        qry = f"""
+        WITH new_data AS (
+        SELECT tgt.uuid
+        , src.franchise_name
+        , src.domain_name
+        , CURRENT_TIMESTAMP as created_at
+        FROM {temp_table_name} src
+        LEFT JOIN sales_leads.city_search_franchises tgt
+        ON src.franchise_name = tgt.franchise_name
+        AND src.domain_name = tgt.domain_name
+        )
+        INSERT INTO sales_leads.city_search_franchises (uuid,franchise_name, domain_name, created_at)
+        SELECT COALESCE(uuid,gen_random_uuid()),franchise_name, domain_name, created_at
+        FROM new_data
+        ON CONFLICT (uuid) DO UPDATE
+        SET   domain_name = EXCLUDED.domain_name
+            , updated_at = CURRENT_TIMESTAMP;
+        DROP TABLE {temp_table_name};
+        """
+
+        with self.engine.begin() as connection:
+            connection.execute(text(qry))
+
+    def post_city_search_slack_message(
+        self, link: str, spread_sheet_name: str, owner: Optional[str] = "U03K3H773RB"
+    ):
+        message = f"""Hi <@{owner}>, <{link}|City Search - {spread_sheet_name} is ready to be disperesed.>"""
+
+        notifier = get_notifier("slack")
+
+        notifier.notify(message=message, webhook_url=os.environ.get("SLACK_WEBHOOK"))
+
+    def get_missing_file_types(self, gdrive: GoogleDrive) -> pd.DataFrame:
+        missing_files = pd.read_sql(
+            """ SELECT uuid
+                                        , replace(trim(both '[]' from parents), '''','') AS parent
+                                        , name 
+                                    FROM sales_leads.drive_metadata WHERE file_type IS NULL """,
+            self.engine,
+        )
+
+        if not missing_files.empty:
+            d = {}
+            for file in missing_files.itertuples():
+                parent_folder = gdrive.get_parent_folder_name(file.parent)
+                d[file.uuid] = parent_folder
+
+            missing_files["file_type"] = missing_files["uuid"].map(d)
+            missing_files["file_type"] = (
+                missing_files["file_type"].str.strip().str.lower().str.replace(" ", "_")
+            )
+            missing_files["file_type"] = missing_files["file_type"].replace(
+                "data drop", "zi_search"
+            )
+
+        return pd.DataFrame() if missing_files.empty else missing_files
+
+    def update_file_types(self, file_dataframe: pd.DataFrame) -> None:
+        temp_table_query = f"""CREATE TEMPORARY TABLE missing_file_types (
+              uuid uuid
+            ,  file_type varchar(255)
+            )"""
+
+        with self.engine.begin() as connection:
+            connection.execute(text(temp_table_query))
+
+        file_dataframe.columns = ["uuid", "file_type"]
+
+        file_dataframe.to_sql(
+            name="missing_file_types", con=self.engine, if_exists="append", index=False
+        )
+
+        update_query = f"""
+        WITH new_data AS (
+            SELECT d.uuid
+            , f.file_type::file_type_enum
+            , current_timestamp as updated_at
+            FROM sales_leads.drive_metadata d
+            INNER JOIN missing_file_types f
+                ON f.uuid = d.uuid
+            WHERE d.file_type IS NULL
+        )
+        INSERT INTO sales_leads.drive_metadata (uuid, file_type, updated_at)
+        SELECT uuid, file_type::file_type_enum, updated_at
+        FROM new_data
+        ON CONFLICT (uuid) DO UPDATE
+        SET file_type = EXCLUDED.file_type
+            , updated_at = EXCLUDED.updated_at;
+        DROP TABLE missing_file_types;"""
+
+        with self.engine.begin() as connection:
+            connection.execute(text(update_query))
+
+    def update_file_has_been_processed(self, file_id: str) -> None:
+        query = f"""
+                UPDATE sales_leads.drive_metadata
+                SET has_been_processed = True
+                WHERE id = '{file_id}'
+                """
+        with self.engine.begin() as connection:
+            connection.execute(text(query))
+
+    def check_if_file_has_been_processed(self, file_id: str) -> bool:
+        with self.engine.connect() as connection:
+            query = f"""
+            SELECT id 
+            FROM sales_leads.drive_metadata 
+            WHERE id = '{file_id}'
+            AND has_been_processed = True
+            """
+            return connection.execute(text(query)).fetchone() is not None
+
+    def change_file_ext_name_to_csv(self, file_name: str) -> None:
+        query = f"UPDATE sales_leads.drive_metadata SET name = REPLACE(name, 'xlsx', 'csv') WHERE name = '{file_name}'"
+        with self.engine.connect() as conn:
+            conn.execute(text(query))
+            
+    def get_columns_from_table(self, table_name: str, schema: str) -> list:
+        with self.engine.connect() as connection:
+            query = f"""
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name = '{table_name}'
+            AND table_schema = '{schema}'
+            AND column_name not in ('uuid','updated_at')
+            """
+            return [c[0] for c in connection.execute(text(query)).fetchall()]
+
+
+@dataclass
+class AzureBlobStorage:
+    connection_string: str
+    blob_service_client: BlobServiceClient = None
+
+    def __post_init__(self):
+        self.blob_service_client = BlobServiceClient.from_connection_string(
+            self.connection_string
+        )
+
+    def upload_dataframe(
+        self, dataframe, container_name, blob_name, file_id: Optional[str] = None
+    ):
+        blob_client = self.blob_service_client.get_blob_client(
+            container_name, blob_name
+        )
+        blob_client.upload_blob(
+            dataframe.to_csv(index=False), blob_type=BlobType.BlockBlob, overwrite=True
+        )
+        logging.info(f"Uploaded {blob_name} to {container_name}")
+
+        if file_id:
+            metadata = {"file_id": file_id}
+            blob_client.set_blob_metadata(metadata)
+
+    def get_blob_metadata(self, container_name, blob_name):
+        blob_client = self.blob_service_client.get_blob_client(
+            container_name, blob_name
+        )
+        return blob_client.get_blob_properties()
+
+    def split_and_return_blob_name(self, blob_name: str) -> str:
+        return blob_name.split("/")[-1]
+
+    def read_blob_to_dataframe(self, container_name, blob_name):
+        blob_client = self.blob_service_client.get_blob_client(
+            container_name, blob_name
+        )
+        stream = blob_client.download_blob()
+        return pd.read_csv(stream.content_as_text())
+
+    def get_blob_from_container(self, container_name, blob_name):
+        blob_client = self.blob_service_client.get_blob_client(
+            container_name, blob_name
+        )
+        return blob_client.download_blob()
+
+    def get_blob_metadata(self, container_name, blob_name):
+        blob_client = self.blob_service_client.get_blob_client(
+            container_name, blob_name
+        )
+        return blob_client.get_blob_properties()
+
+    def list_blobs(self, container_name):
+        container_client = self.blob_service_client.get_container_client(container_name)
+        return container_client.list_blobs()
