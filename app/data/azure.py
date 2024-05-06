@@ -169,6 +169,12 @@ class PostgresExporter:
                 
                 existing_columns = list(set(column_names) & set(dataset.columns))
                 dataset = dataset[existing_columns]
+            else:
+                column_names = self.get_columns_from_table(table_name, schema)
+                missing_columns = set(column_names) - set(dataset.columns)
+                for col in missing_columns:
+                    dataset[col] = ""
+                dataset = dataset[column_names]
 
             dataset.to_sql(
                 name=table_name,

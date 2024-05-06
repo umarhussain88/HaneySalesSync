@@ -77,66 +77,59 @@ if __name__ == "__main__":
 
     st = SalesTransformations(engine=psql.engine, google_api=gdrive)
     
+    files = ['xMarga-043024-Hotel-Person-91.csv', 'xMarga-043024-University-Person-65.csv']
     
-    
-    
-    myblob = az.get_blob_from_container(
-        container_name="salesfiles",
-        blob_name="city_search/WI - Brown County - Cleaning Service - 1-23-24.csv",
-    )
-    # all_child_modified_files = gdrive.get_modified_files_in_folder(
-    #         folder_id=os.environ.get("PARENT_FOLDER"), delta_days=3
-    #     )
-
-    # if all_child_modified_files:
-    #     file_dataframe_all = gdrive.create_file_list_dataframe(
-    #         all_child_modified_files, record_path=None
-    #     )
-    #     logging.info(f"Number of files edited: {file_dataframe_all.shape[0]}")
-    #     file_config = gdrive.get_file_config(
-    #         os.environ.get("QUICK_MAIL_CONFIG_NAME"),
-    #         folder_id=os.environ.get("QUICK_MAIL_CONFIG_FOLDER_ID"),
-    #     )
+    for file_n in files:
         
-        # logging.info('Checking if files exist in database')
-        
-        # file_dataframe_all = file_dataframe_all.reset_index(drop=True)
-        # file_dataframe_all = file_dataframe_all[file_dataframe_all['name'].str.contains('Larimer County CO -')]
-        
-    blob_name_without_container = myblob.name.replace("salesfiles/", "")
-    blob_metadata = az.get_blob_metadata(container_name='salesfiles', blob_name=blob_name_without_container)
-    
-    file_id = blob_metadata["metadata"]["file_id"]
-
-    has_file_been_processed = psql.check_if_file_has_been_processed(file_id=file_id)
-
-    logging.info("Getting franchise data")
-    franchise_df = gdrive.get_franchise_data(
-        file_id=os.environ.get("FRANCHISE_MASTER_LIST_FILE_ID")
-
-    )
-    logging.info("Upserting franchise data")
-    psql.upsert_franchise_data(
-        dataframe=franchise_df, temp_table_name="temp_franchise_data"
-    )
-    if not has_file_been_processed:
-        blob_bytes = myblob.read()
-        
-        columns = psql.get_columns_from_table("city_search", "sales_leads")
-        
-        df = pd.read_csv(io.BytesIO(blob_bytes))
-        psql.insert_raw_data(dataset=df, table_name="city_search", schema="sales_leads", column_names=columns)
-
-    logging.info("Creating city search output")
-    sheet_url_dict = st.post_city_search_data_to_google_sheet(
-        spreadsheet_name=f"City Search Output - {sheet_week}",
-        folder_id=os.environ.get("CITY_SEARCH_OUTPUT_PARENT_FOLDER_ID"),
-        file_id=file_id
-    )
-    for name, sheet_url in sheet_url_dict.items():
-        logging.info(f'{name}: {sheet_url}')
-        psql.post_city_search_slack_message(
-        link=sheet_url_dict[name], spread_sheet_name=name
+        myblob = az.get_blob_from_container(
+            container_name="salesfiles",
+            blob_name=f"zi_search/{file_n}",
         )
+            
+        blob_name_without_container = myblob.name.replace("salesfiles/", "")
+        blob_metadata = az.get_blob_metadata(container_name='salesfiles', blob_name=blob_name_without_container)
+            
+        file_id = blob_metadata["metadata"]["file_id"]
 
-    psql.update_file_has_been_processed(file_id=file_id)
+        file_name = az.split_and_return_blob_name(myblob.name)
+
+        has_file_been_processed = psql.check_if_file_has_been_processed(file_id=file_id)
+
+        if not has_file_been_processed:
+            
+            
+            blob_str = myblob.read().decode()
+            logging.info(f"Processing file: {file_name}")
+            df = pd.read_csv(io.StringIO(blob_str))
+            psql.insert_raw_data(dataset=df, table_name="leads", schema="sales_leads")
+            psql.update_file_has_been_processed(file_id=file_id)
+            
+            
+            new_lead_data_zi = st.get_new_zi_search_lead_data(file_name=file_name)
+
+            if not new_lead_data_zi.empty:
+                sheet_data = st.create_google_lead_data_frame(new_lead_data_zi)
+                uuid = new_lead_data_zi["drive_metadata_uuid"].values[0]
+                logging.info(f"uuid: {uuid} for {file_name}")
+
+                logging.info(f"Writing {file_name} to google sheet")
+                gdrive.write_to_google_sheet(
+                    dataframe=sheet_data,
+                    spreadsheet_name=f"Quick Mail Output - {sheet_week}",
+                    target_sheet=file_name,
+                    folder_id=os.environ.get("QUICK_MAIL_OUTPUT_PARENT_FOLDER_ID"),
+                )
+                logging.info("Wrote data to google sheet")
+
+                psql.update_tracking_table(uuid)
+                logging.info("Updated tracking table")
+
+                psql.update_tracking_table_shopify_customer(drive_metadata_uuid=uuid)
+                logging.info("Updated tracking table for shopify customer")
+
+                slack_df = psql.get_slack_channel_metrics_zi_search(drive_metadata_uuid=uuid)
+                psql.send_update_slack_metrics(
+                    slack_webhook=os.environ.get("SLACK_WEBHOOK"), slack_df=slack_df
+                )
+        
+        st.create_zi_list(quick_mail_folder_id=os.environ.get("QUICK_MAIL_CONFIG_FOLDER_ID"))
