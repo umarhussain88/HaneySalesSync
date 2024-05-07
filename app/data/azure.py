@@ -176,6 +176,9 @@ class PostgresExporter:
                     dataset[col] = ""
                 dataset = dataset[column_names]
 
+            if table_name == 'drive_metadata':
+                dataset = dataset.drop(columns=['config_file_uuid', 'hubspot_owner', 'zi_search', 'has_posted_on_slack', 'file_type', 'has_been_processed'])
+            
             dataset.to_sql(
                 name=table_name,
                 schema=schema,
