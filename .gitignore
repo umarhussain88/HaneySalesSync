@@ -139,7 +139,7 @@ __azurite_db*__.json
 target/
 dbt_packages/
 logs/
-.vscode
+
 /data
 # until i get the ci/cd setup properly
 .github/*

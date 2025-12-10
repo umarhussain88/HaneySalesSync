@@ -84,7 +84,7 @@ sheet_week = f"Week {pd.Timestamp('today').isocalendar().week}"
     schedule="*/10 * * * 1-5",
     arg_name="GoogleSalesSync",
     run_on_startup=False,
-    use_monitor=False,
+    use_monitor=True,
 )
 def sales_sync(GoogleSalesSync: func.TimerRequest) -> None:
     if GoogleSalesSync.past_due:
@@ -192,7 +192,7 @@ def ZiSearchBlobTrigger(myblob: func.InputStream):
         
         new_lead_data_zi = st.get_new_zi_search_lead_data(file_name=file_name)
 
-        if not new_lead_data_zi.empty:
+        if not new_lead_data_zi.empty:P
             sheet_data = st.create_google_lead_data_frame(new_lead_data_zi)
             uuid = new_lead_data_zi["drive_metadata_uuid"].values[0]
             logging.info(f"uuid: {uuid} for {file_name}")
