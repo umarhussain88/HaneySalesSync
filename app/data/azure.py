@@ -5,7 +5,7 @@ from typing import Optional
 import pandas as pd
 from sqlalchemy import create_engine, types, text
 from sqlalchemy.engine import URL
-from notifiers import get_notifier
+import requests
 import textwrap
 import logging
 from app.google_drive.drive import GoogleDrive
@@ -131,7 +131,7 @@ class PostgresExporter:
         dataset.columns = (
             dataset.columns.str.strip()
             .str.lower()
-            .str.replace("\s|-|\|/|\.|\(|\)", "_", regex=True)
+            .str.replace(r"\s|-|\|/|\.|\(|\)", "_", regex=True)
         )
         # remove doulbe underscores and trailing underscores
         dataset.columns = dataset.columns.str.replace("__", "_", regex=True).str.rstrip(
@@ -464,7 +464,6 @@ class PostgresExporter:
 
         if not missing_config.empty:
             for index, row in missing_config.iterrows():
-                notifier = get_notifier("slack")
                 missing_config_msg = textwrap.dedent(
                     f"""
                 Missing Config File: {row['name']}
@@ -476,10 +475,16 @@ class PostgresExporter:
                 """
                 )
 
-                notifier.notify(
-                    message=missing_config_msg,
-                    webhook_url=slack_webhook,
+                response = requests.post(
+                    slack_webhook,
+                    json={"text": missing_config_msg}
                 )
+                
+                if response.status_code == 200:
+                    logging.info("Slack notification sent successfully")
+                else:
+                    logging.error(f"Failed to send slack notification: {response.status_code}")
+
 
                 self.update_drive_table_slack_posted()
 
@@ -502,11 +507,16 @@ class PostgresExporter:
             if sheet_name != "":
                 message = message + f"\nSpreadsheet: <{sheet_url}|{sheet_name}>"
 
-            notifier = get_notifier("slack")
             logging.info(message)
-            notifier.notify(
-                message=message, webhook_url=os.environ.get("SLACK_WEBHOOK")
+            response = requests.post(
+                os.environ.get("SLACK_WEBHOOK"),
+                json={"text": message}
             )
+            
+            if response.status_code == 200:
+                logging.info("Slack metrics notification sent successfully")
+            else:
+                logging.error(f"Failed to send slack metrics: {response.status_code}")
 
     def update_drive_table_slack_posted(self) -> None:
         qry = f"""
@@ -615,11 +625,18 @@ class PostgresExporter:
     def post_city_search_slack_message(
         self, link: str, spread_sheet_name: str, owner: Optional[str] = "U03K3H773RB"
     ):
-        message = f"""Hi <@{owner}>, <{link}|City Search - {spread_sheet_name} is ready to be disperesed.>"""
+        message = f"""Hi <@{owner}>, <{link}|City Search - {spread_sheet_name} is ready to be dispersed.>"""
 
-        notifier = get_notifier("slack")
-
-        notifier.notify(message=message, webhook_url=os.environ.get("SLACK_WEBHOOK"))
+        # Replace notifier with requests
+        response = requests.post(
+            os.environ.get("SLACK_WEBHOOK"),
+            json={"text": message}
+        )
+        
+        if response.status_code == 200:
+            logging.info("City search slack notification sent successfully")
+        else:
+            logging.error(f"Failed to send city search notification: {response.status_code}")
 
     def get_missing_file_types(self, gdrive: GoogleDrive) -> pd.DataFrame:
         missing_files = pd.read_sql(
